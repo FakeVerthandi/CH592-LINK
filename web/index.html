@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CH592 LINK · BLE 烧录</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="session.js"></script><script defer src="core.js"></script><script defer src="app.js"></script>
+</head>
+<body>
+<main>
+  <header class="masthead">
+    <div class="masthead-main">
+      <div class="brandline">
+        <span class="brand-mark" aria-hidden="true"><span class="seal-char">链</span></span>
+        <div class="brand-copy">
+          <p class="eyebrow">CH592 LINK / WEB R6</p>
+          <h1>无线烧录与 Flash 校验</h1>
+          <p class="subtitle">STM32F103C8T6 · 64KiB Flash · 电脑端 <span class="nowrap">Chrome / Edge</span></p>
+        </div>
+      </div>
+      <div class="status-cluster">
+        <span class="status-label">连接状态</span>
+        <span id="connection" class="badge">未连接</span>
+      </div>
+    </div>
+  </header>
+
+  <div id="environment" class="notice" role="status">正在检查浏览器蓝牙能力…</div>
+
+  <div class="grid">
+    <section class="card">
+      <div class="card-head">
+        <div class="step">01 / 连接目标</div>
+        <span class="chip" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <rect x="5.5" y="5.5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M8 2.8v2.7M12 2.8v2.7M8 14.5v2.7M12 14.5v2.7M2.8 8h2.7M2.8 12h2.7M14.5 8h2.7M14.5 12h2.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          SWD
+        </span>
+      </div>
+      <h2>CH592-LINK</h2>
+      <p class="card-intro">PA5 → SWCLK，PA4 → SWDIO，GND 共地。STM32 目标需供电；CH592 LINK 可独立供电，通过蓝牙连接电脑。</p>
+
+      <div class="readout">
+        <div class="readout-head">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <circle cx="10" cy="10" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M10 2v3M10 15v3M2 10h3M15 10h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            <circle cx="10" cy="10" r="1.6" fill="currentColor"/>
+          </svg>
+          <span>设备与目标</span>
+        </div>
+        <div id="device" class="detail readout-value">等待连接</div>
+      </div>
+
+      <div class="action-zone">
+        <div class="actions actions-lead">
+          <button id="connect" class="primary">选择蓝牙设备</button>
+        </div>
+        <div class="action-group">
+          <span class="action-caption">连接管理</span>
+          <div class="actions">
+            <button id="disconnect" disabled>断开连接</button>
+            <button id="reconnect" disabled>重连上次设备</button>
+            <button id="cancel-connect" disabled>取消连接</button>
+            <button id="reset-connection" disabled>保存日志并重新加载</button>
+          </div>
+        </div>
+        <div class="action-group">
+          <span class="action-caption">目标识别与诊断</span>
+          <div class="actions">
+            <button id="retry-attach" disabled>重试识别目标</button>
+            <button id="diagnose" disabled>读取 SWD 诊断</button>
+            <button id="link-status" disabled>读取蓝牙状态</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="note">
+        <p class="hint"><strong>识别目标会暂停 STM32。</strong>请先退出占用 LINK 的 USB 调试会话。请只保留一个工具页面连接设备。若一直等待系统清理，可保存日志并重新加载；之后需重新选择固件。</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div class="step">02 / 选择固件</div>
+        <span class="chip" aria-hidden="true">BIN · HEX</span>
+      </div>
+      <h2>BIN 或 Intel HEX</h2>
+
+      <label class="file-label" for="file">
+        <span class="file-cta">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path d="M5 2.75h6.2L15.5 7v9.25a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3.75a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M11 3v4.25h4.25M7 11h6M7 14h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span>选择本地文件</span>
+        </span>
+        <input id="file" type="file" accept=".bin,.hex,.ihex">
+        <span class="file-meta">.bin · .hex · .ihex　仅在本机解析，不上传</span>
+      </label>
+
+      <div class="readout">
+        <div class="readout-head">
+          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <path d="M4 3.5h8.5L16 6.8v9.7H4Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M7 8.5h6M7 11.5h6M7 14.5h3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span>固件摘要</span>
+        </div>
+        <div id="image" class="detail readout-value">BIN 基址固定为 0x08000000；HEX 按文件地址解析。</div>
+      </div>
+
+      <p class="hint">仅擦除包含文件数据的 1KiB 页。该页内的文件空洞与补齐字节设为 FF。</p>
+
+      <label>写入模式
+        <select id="write-mode">
+          <option value="safe">20B 保守发送</option>
+          <option value="4">20B 混合 · 每 4 片确认</option>
+          <option value="8">20B 混合 · 每 8 片确认</option>
+          <option value="16">20B 混合 · 每 16 片确认</option>
+          <option id="two-writes" value="two" disabled>139B 有应答写 · 满块两次确认</option>
+        </select>
+      </label>
+      <label>目标 SWCLK 请求
+        <select id="swd-clock">
+          <option value="0">250 kHz（基线）</option>
+          <option value="2">2 MHz（实验）</option>
+          <option value="5">5 MHz（实验）</option>
+        </select>
+      </label>
+
+      <label class="switch-row">
+        <input id="strict-verify" type="checkbox">
+        <span class="switch-copy">
+          <span class="switch-title">完整逐字节读回</span>
+          <span class="switch-desc">勾选后可导出读回 BIN。默认优先使用目标端页 CRC32，旧固件使用完整读回。</span>
+        </span>
+      </label>
+
+      <div class="actions firmware-actions">
+        <button id="transfer-test" disabled>测试传输（不擦写）</button>
+      </div>
+
+      <div class="note">
+        <p class="hint">快传在点击烧录后自动检查，通过后才开始擦写；也可单独点击自检。自检不擦写 STM32。</p>
+      </div>
+    </section>
+  </div>
+
+  <section class="card execution">
+    <div class="card-head">
+      <div class="step">03 / 烧录与校验</div>
+      <span class="chip" aria-hidden="true">擦除 · 写入 · 校验</span>
+    </div>
+    <div class="execution-head">
+      <h2 id="stage">等待准备</h2>
+      <span id="percent">0%</span>
+    </div>
+    <div class="progress-wrap">
+      <progress id="progress" value="0" max="1" aria-label="烧录与校验进度"></progress>
+    </div>
+    <div id="status" class="detail" role="status" aria-live="polite">连接目标并选择文件后即可开始。首次候选版优先验证完整性。</div>
+    <div class="actions execution-actions">
+      <button id="flash" class="primary" disabled>擦除、写入并校验</button>
+      <button id="stop" disabled>停止后续擦写</button>
+      <button id="run" disabled>软件复位运行</button>
+      <button id="release" disabled>释放会话并保持停机</button>
+    </div>
+    <p class="hint">停止按钮等待当前一页擦除或一块写入结束，再停止后续操作。断开连接会触发设备清理；已擦写内容不会回滚。出现错误后须重新识别目标并从头烧录。</p>
+  </section>
+
+  <section class="card log-card">
+    <div class="log-head">
+      <div class="log-heading">
+        <div class="step">04 / 日志与导出</div>
+        <h2>
+          <span class="h2-icon" aria-hidden="true">
+            <svg viewBox="0 0 20 20" focusable="false">
+              <rect x="2.5" y="3.5" width="15" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M6 8l2.5 2L6 12M10.5 12.5h3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          运行记录
+        </h2>
+      </div>
+      <div class="actions log-actions">
+        <button id="save-log">保存日志</button>
+        <button id="save-readback" disabled>保存校验读回 BIN</button>
+      </div>
+    </div>
+    <pre id="log" tabindex="0" aria-label="运行日志"></pre>
+    <p class="hint log-note">保存的校验读回 BIN 从 0x08000000 起，未参与本次操作的页以 FF 占位且未被读取；它是本次校验页记录，不是整片备份。</p>
+  </section>
+
+  <footer>
+    <p>烧录对象是外部 STM32。NRST 未接，运行操作使用 SYSRESETREQ 软件复位。</p>
+    <p>页面不自动重试擦写命令；校验成功后目标保持停机，按需点击运行。</p>
+    <p>支持主动断链的固件会请求 CH592 断链并等待终止事件；烧录中请先点击“停止后续擦写”。</p>
+  </footer>
+</main>
+</body></html>
