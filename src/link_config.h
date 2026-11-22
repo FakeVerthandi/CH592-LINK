@@ -31,4 +31,9 @@
 #define LINK_BLE_SRAM_WRITE 0
 #endif
 
+/* Disabled by default so Cortex-M3/M4 targets report real CPUID/ROM tables. */
+#ifndef LINK_SWD_SYNTHETIC_M3_IDS
+#define LINK_SWD_SYNTHETIC_M3_IDS 0
+#endif
+
 #endif

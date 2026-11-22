@@ -83,10 +83,16 @@
 #define EP4_OUT_MPS EP_MPS
 
 /*!< User defined assignment endpoint RAM */
+#if LINK_BLE_ENABLE
+/* CH592-LINK BLE build only opens EP0 (control) and EP2 (Bulk OUT/IN). */
+__attribute__((aligned(4))) uint8_t ep0_data_buff[64];
+__attribute__((aligned(4))) uint8_t ep2_data_buff[64 + 64]; /*!< ep2_out(64)+ep2_in(64) */
+#else
 __attribute__((aligned(4))) uint8_t ep0_data_buff[64 + EP4_OUT_MPS + EP4_IN_MPS]; /*!< ep0(64)+ep4_out(64)+ep4_in(64) */
 __attribute__((aligned(4))) uint8_t ep1_data_buff[64 + 64];                       /*!< ep1_out(64)+ep1_in(64) */
 __attribute__((aligned(4))) uint8_t ep2_data_buff[64 + 64];                       /*!< ep2_out(64)+ep2_in(64) */
 __attribute__((aligned(4))) uint8_t ep3_data_buff[64 + 64];                       /*!< ep3_out(64)+ep3_in(64) */
+#endif
 #if (CONFIG_USBDEV_EP_NUM == 8)
 /**
  * This dcd porting can be used on ch581, ch582, ch583,
@@ -137,6 +143,10 @@ int usb_dc_init(uint8_t busid)
     usb_dc_cfg.ep_in[0].ep_ram_addr = ep0_data_buff;
     usb_dc_cfg.ep_out[0].ep_ram_addr = ep0_data_buff;
 
+#if LINK_BLE_ENABLE
+    usb_dc_cfg.ep_in[2].ep_ram_addr = ep2_data_buff + 64;
+    usb_dc_cfg.ep_out[2].ep_ram_addr = ep2_data_buff;
+#else
     usb_dc_cfg.ep_in[1].ep_ram_addr = ep1_data_buff + 64;
     usb_dc_cfg.ep_out[1].ep_ram_addr = ep1_data_buff;
 
@@ -148,6 +158,7 @@ int usb_dc_init(uint8_t busid)
 
     usb_dc_cfg.ep_in[4].ep_ram_addr = ep0_data_buff + 64 + EP4_OUT_MPS;
     usb_dc_cfg.ep_out[4].ep_ram_addr = ep0_data_buff + 64;
+#endif
 #if (CONFIG_USBDEV_EP_NUM == 8)
     usb_dc_cfg.ep_in[5].ep_ram_addr = ep5_data_buff + 64;
     usb_dc_cfg.ep_out[5].ep_ram_addr = ep5_data_buff;
@@ -160,15 +171,24 @@ int usb_dc_init(uint8_t busid)
 #endif
     /*!< Set the mode first and cancel RB_UC_CLR_ALL */
     CH58x_USBFS_DEV->USB_CTRL = 0x00;
+#if LINK_BLE_ENABLE
+    CH58x_USBFS_DEV->UEP4_1_MOD = 0x00;
+    CH58x_USBFS_DEV->UEP2_3_MOD = RB_UEP2_RX_EN | RB_UEP2_TX_EN; /*!< EP2 OUT+IN only */
+#else
     CH58x_USBFS_DEV->UEP4_1_MOD = RB_UEP4_RX_EN | RB_UEP4_TX_EN | RB_UEP1_RX_EN | RB_UEP1_TX_EN; /*!< EP4 OUT+IN   EP1 OUT+IN */
     CH58x_USBFS_DEV->UEP2_3_MOD = RB_UEP2_RX_EN | RB_UEP2_TX_EN | RB_UEP3_RX_EN | RB_UEP3_TX_EN; /*!< EP2 OUT+IN   EP3 OUT+IN */
+#endif
 #if (CONFIG_USBDEV_EP_NUM == 8)
     CH58x_USBFS_DEV->UEP567_MOD = RB_UEP5_RX_EN | RB_UEP5_TX_EN | RB_UEP6_RX_EN | RB_UEP6_TX_EN | RB_UEP7_RX_EN | RB_UEP7_TX_EN; /*!< EP5 EP6 EP7   OUT+IN */
 #endif
     CH58x_USBFS_DEV->UEP0_DMA = (uint16_t)(uint32_t)ep0_data_buff;
+#if !LINK_BLE_ENABLE
     CH58x_USBFS_DEV->UEP1_DMA = (uint16_t)(uint32_t)ep1_data_buff;
+#endif
     CH58x_USBFS_DEV->UEP2_DMA = (uint16_t)(uint32_t)ep2_data_buff;
+#if !LINK_BLE_ENABLE
     CH58x_USBFS_DEV->UEP3_DMA = (uint16_t)(uint32_t)ep3_data_buff;
+#endif
 #if (CONFIG_USBDEV_EP_NUM == 8)
     CH58x_USBFS_DEV->UEP5_DMA = (uint16_t)(uint32_t)ep5_data_buff;
     CH58x_USBFS_DEV->UEP6_DMA = (uint16_t)(uint32_t)ep6_data_buff;

@@ -14,9 +14,9 @@
       <div class="brandline">
         <span class="brand-mark" aria-hidden="true"><span class="seal-char">链</span></span>
         <div class="brand-copy">
-          <p class="eyebrow">CH592 LINK / WEB R6</p>
+          <p class="eyebrow">CH592 LINK / WEB 0.4.2</p>
           <h1>无线烧录与 Flash 校验</h1>
-          <p class="subtitle">STM32F103C8T6 · 64KiB Flash · 电脑端 <span class="nowrap">Chrome / Edge</span></p>
+          <p class="subtitle">STM32 F1 / F3 / F4 · 电脑端 <span class="nowrap">Chrome / Edge</span></p>
         </div>
       </div>
       <div class="status-cluster">
@@ -113,7 +113,7 @@
         <div id="image" class="detail readout-value">BIN 基址固定为 0x08000000；HEX 按文件地址解析。</div>
       </div>
 
-      <p class="hint">仅擦除包含文件数据的 1KiB 页。该页内的文件空洞与补齐字节设为 FF。</p>
+      <p class="hint">按目标芯片模型擦除受影响区域（F1/F3 按 1KiB/2KiB 页；F4 按 16K/64K/128K 整扇区）。未写入空洞与补齐字节设为 FF。</p>
 
       <label>写入模式
         <select id="write-mode">
@@ -136,7 +136,7 @@
         <input id="strict-verify" type="checkbox">
         <span class="switch-copy">
           <span class="switch-title">完整逐字节读回</span>
-          <span class="switch-desc">勾选后可导出读回 BIN。默认优先使用目标端页 CRC32，旧固件使用完整读回。</span>
+          <span class="switch-desc">勾选后可导出读回 BIN。默认优先使用目标端 1KiB 块 CRC32 校验，速度更快。</span>
         </span>
       </label>
 
@@ -169,7 +169,7 @@
       <button id="run" disabled>软件复位运行</button>
       <button id="release" disabled>释放会话并保持停机</button>
     </div>
-    <p class="hint">停止按钮等待当前一页擦除或一块写入结束，再停止后续操作。断开连接会触发设备清理；已擦写内容不会回滚。出现错误后须重新识别目标并从头烧录。</p>
+    <p class="hint">停止按钮等待当前页/扇区擦除或一块写入结束，再停止后续操作。断开连接会触发设备清理；已擦写内容不会回滚。出现错误后须重新识别目标并从头烧录。</p>
   </section>
 
   <section class="card log-card">

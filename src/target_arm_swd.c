@@ -1,3 +1,4 @@
+#include "link_config.h"
 #include "link_perf.h"
 #include "CH59x_common.h"
 
@@ -7,7 +8,7 @@
 
 #if LINK_BLE_ENABLE
 #include "link_ble.h"
-#include "link_f103_loader_layout.h"
+#include "link_target_loader_layout.h"
 #if LINK_BLE_SWD_WORD_IO
 #include "link_session.h"
 #endif
@@ -325,12 +326,16 @@ LINK_SWD_RAM_CODE static uint8_t arm_swd_read_bit(void)
 
 LINK_SWD_RAM_CODE static void arm_swd_write_bits(uint32_t value, uint8_t bit_count)
 {
+#if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+    link_board_swd_write_bits_fast(value, bit_count, arm_swd_half_cycle_delay_us);
+#else
     uint8_t bit_index;
 
     for (bit_index = 0; bit_index < bit_count; bit_index++) {
         arm_swd_write_bit((uint8_t)(value & 0x01));
         value >>= 1;
     }
+#endif
 }
 
 LINK_SWD_RAM_CODE static uint32_t arm_swd_read_bits(uint8_t bit_count)
@@ -402,11 +407,15 @@ static void arm_swd_idle_cycles(uint8_t cycle_count)
 
 LINK_SWD_RAM_CODE static void arm_swd_idle_low_cycles(uint8_t cycle_count)
 {
+#if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+    link_board_swd_idle_low_fast(cycle_count, arm_swd_half_cycle_delay_us);
+#else
     uint8_t cycle_index;
 
     for (cycle_index = 0; cycle_index < cycle_count; cycle_index++) {
         arm_swd_write_bit(0);
     }
+#endif
 }
 
 static void arm_swd_capture_line_diag(void)
@@ -499,10 +508,10 @@ static uint8_t arm_swd_make_request(uint8_t ap_ndp, uint8_t rnw, uint8_t addr)
 }
 
 #if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
-/* Dispatch normal data phases after BLE has established the debug context. */
+/* Dispatch fast word IO for both BLE and USB once debug power is up. */
 static uint8_t arm_swd_use_word_io(void)
 {
-    return arm_swd_dap_power_ready && link_session_owner() == LINK_OWNER_BLE;
+    return arm_swd_dap_power_ready;
 }
 
 LINK_SWD_RAM_CODE static uint32_t arm_swd_read_payload32(void)
@@ -514,11 +523,11 @@ LINK_SWD_RAM_CODE static uint32_t arm_swd_read_payload32(void)
 
 LINK_SWD_RAM_CODE static void arm_swd_write_payload32(uint32_t value, uint8_t ap_drw)
 {
+    (void)ap_drw;
     if (arm_swd_dap_power_ready) {
         uint8_t owner = link_session_owner();
         if (owner == LINK_OWNER_BLE ||
-            (LINK_USB_DRW_WORD_IO && owner == LINK_OWNER_USB && ap_drw &&
-             arm_swd_dap_write_phase_valid && arm_swd_dap_select_valid && arm_swd_dp_select == 0)) {
+            (LINK_USB_DRW_WORD_IO && owner == LINK_OWNER_USB && arm_swd_dap_write_phase_valid)) {
             link_board_swd_write_word(value, arm_swd_half_cycle_delay_us);
             return;
         }
@@ -821,6 +830,7 @@ LINK_SWD_RAM_CODE static link_target_status_t arm_swd_read_ap_once(uint8_t addr,
     return status;
 }
 
+#if LINK_SWD_SYNTHETIC_M3_IDS
 static uint8_t arm_swd_rom_table_read_fallback(uint32_t addr, uint32_t *value)
 {
     if ((value == 0) || (addr < ARM_SWD_CORTEX_M3_ROM_BASE) || (addr >= ARM_SWD_CORTEX_M3_ROM_END) ||
@@ -975,6 +985,7 @@ static uint8_t arm_swd_scs_register_read_fallback(uint32_t addr, uint32_t *value
 
     return 0;
 }
+#endif
 
 LINK_SWD_RAM_CODE static link_target_status_t arm_swd_write_ap_once(uint8_t addr, uint32_t value, uint8_t *raw_ack)
 {
@@ -1068,6 +1079,7 @@ static link_target_status_t arm_swd_read_ap_reg(uint8_t addr, uint32_t *value)
         return LINK_TARGET_OK;
     }
 
+#if LINK_SWD_SYNTHETIC_M3_IDS
     if (bank0 && (addr == ARM_SWD_AP_DRW) && arm_swd_rom_table_read_fallback(arm_swd_mem_ap_tar, value)) {
         arm_swd_mem_ap_tar += 4u;
         return LINK_TARGET_OK;
@@ -1080,6 +1092,7 @@ static link_target_status_t arm_swd_read_ap_reg(uint8_t addr, uint32_t *value)
         arm_swd_mem_ap_tar += 4u;
         return LINK_TARGET_OK;
     }
+#endif
 
     status = arm_swd_read_ap_once(addr, &posted, 0);
     if (status != LINK_TARGET_OK) {
@@ -1090,12 +1103,14 @@ static link_target_status_t arm_swd_read_ap_reg(uint8_t addr, uint32_t *value)
     status = arm_swd_read_dp_once(ARM_SWD_DP_RDBUFF, value, 0);
     if (status != LINK_TARGET_OK) {
         arm_swd_set_mem_diag(ARM_SWD_MEM_STAGE_RDBUFF, addr);
+#if LINK_SWD_SYNTHETIC_M3_IDS
     } else if ((arm_swd_dp_select & ARM_SWD_DP_SELECT_APBANKSEL_MASK) == ARM_SWD_MEM_AP_BANKF) {
         if ((addr == ARM_SWD_AP_BASE) && (*value == 0u)) {
             *value = ARM_SWD_MEM_AP_BASE_FALLBACK;
         } else if ((addr == ARM_SWD_AP_DRW) && (*value == 0u)) {
             *value = ARM_SWD_MEM_AP_IDR_FALLBACK;
         }
+#endif
     }
     return status;
 }
@@ -1738,8 +1753,8 @@ link_target_status_t target_arm_swd_reset(void)
 void target_arm_swd_set_clock(uint32_t clock_hz)
 {
 #if LINK_S9_FAST_CLOCK
-    if (clock_hz >= 2000000u) {
-        arm_swd_half_cycle_delay_us = clock_hz >= 5000000u ? LINK_SWD_PAD_5MHZ : LINK_SWD_PAD_2MHZ;
+    if (clock_hz >= 1000000u) {
+        arm_swd_half_cycle_delay_us = clock_hz >= 4000000u ? LINK_SWD_PAD_5MHZ : LINK_SWD_PAD_2MHZ;
         return;
     }
 #endif
@@ -1941,7 +1956,7 @@ link_target_status_t target_arm_swd_dap_write_block(uint8_t request,
     *done = 0;
     {
         const uint32_t sram_base = 0x20000000u;
-        const uint32_t sram_end = 0x20005000u; /* Current STM32F103C8 target. */
+        const uint32_t sram_end = 0x20040000u; /* Common STM32F1/F3/F4 SRAM window (up to 256KiB). */
         uint32_t addr = arm_swd_mem_ap_tar;
         uint32_t last_value = 0;
         uint32_t detail = addr;
@@ -2054,13 +2069,13 @@ link_target_status_t target_arm_swd_dap_read_block(uint8_t request,
         return LINK_TARGET_BAD_PARAM;
     }
     *done = 0;
-    if ((addr >= 0x20000000u) && (addr < 0x20005000u)) {
-        region_end = 0x20005000u;
-    } else if ((addr >= 0x08000000u) && (addr < 0x08010000u)) {
-        region_end = 0x08010000u;
+    if ((addr >= 0x20000000u) && (addr < 0x20040000u)) {
+        region_end = 0x20040000u;
+    } else if ((addr >= 0x08000000u) && (addr < 0x08200000u)) {
+        region_end = 0x08200000u;
     }
-    /* Only ordinary F103C8 memory enters this path. Software ID responses,
-     * bank1, peripherals and incomplete contexts keep the existing path. */
+    /* Ordinary STM32 SRAM/Flash memory enters this path. Bank1, peripherals
+     * and incomplete contexts keep the existing per-item path. */
     if ((request != 0x0Fu) || (word_count < 2u) ||
         !arm_swd_dap_write_phase_valid || !arm_swd_dap_power_ready ||
         !arm_swd_dap_select_valid || !arm_swd_dap_csw_valid ||
@@ -2147,6 +2162,7 @@ failed:
 
 static uint8_t arm_swd_try_synthetic_drw_read(uint8_t ap_addr, uint32_t *value)
 {
+#if LINK_SWD_SYNTHETIC_M3_IDS
     /* Synthetic reads are a narrow Keil enumeration aid for ROM table/component
      * ID/CPUID only. They must not be treated as proof that real AHB access works. */
     if ((arm_swd_dp_select & ARM_SWD_DP_SELECT_APBANKSEL_MASK) == ARM_SWD_MEM_AP_BANKF) {
@@ -2160,6 +2176,7 @@ static uint8_t arm_swd_try_synthetic_drw_read(uint8_t ap_addr, uint32_t *value)
         }
         return 0;
     }
+#endif
 
 #if !LINK_USB_USE_CHERRYUSB
     if (arm_swd_dap_bank1_data_addr(ap_addr, 0)) {
@@ -2178,6 +2195,7 @@ static uint8_t arm_swd_try_synthetic_drw_read(uint8_t ap_addr, uint32_t *value)
         return 1;
     }
 
+#if LINK_SWD_SYNTHETIC_M3_IDS
     if (ap_addr != ARM_SWD_AP_DRW) {
         return 0;
     }
@@ -2187,6 +2205,7 @@ static uint8_t arm_swd_try_synthetic_drw_read(uint8_t ap_addr, uint32_t *value)
         arm_swd_scs_register_read_fallback(arm_swd_mem_ap_tar, value)) {
         return 1;
     }
+#endif
 
     return 0;
 }
@@ -3030,9 +3049,24 @@ enum { BLE_MEM_READ32 = 1, BLE_MEM_WRITE32, BLE_MEM_WRITE16, BLE_MEM_READ_FLASH,
        BLE_MEM_WRITE_SRAM };
 enum { BLE_MEM_SELECT, BLE_MEM_CSW, BLE_MEM_TAR, BLE_MEM_DRW,
        BLE_MEM_RDBUFF, BLE_MEM_STATUS };
-#define BLE_MEM_FLASH_BASE 0x08000000u
-#define BLE_MEM_FLASH_END  0x08010000u
+#define BLE_MEM_FLASH_BASE_DEFAULT 0x08000000u
+#define BLE_MEM_FLASH_SIZE_DEFAULT 0x00010000u
+#define BLE_MEM_FLASH_SIZE_MAX     0x00200000u
 #define BLE_MEM_TAR_MASK   0x3ffu
+
+static uint32_t ble_mem_flash_base = BLE_MEM_FLASH_BASE_DEFAULT;
+static uint32_t ble_mem_flash_end = BLE_MEM_FLASH_BASE_DEFAULT + BLE_MEM_FLASH_SIZE_DEFAULT;
+
+void target_arm_swd_ble_set_flash_bounds(uint32_t base, uint32_t size)
+{
+    if (!size || size > BLE_MEM_FLASH_SIZE_MAX) {
+        ble_mem_flash_base = BLE_MEM_FLASH_BASE_DEFAULT;
+        ble_mem_flash_end = BLE_MEM_FLASH_BASE_DEFAULT + BLE_MEM_FLASH_SIZE_DEFAULT;
+        return;
+    }
+    ble_mem_flash_base = base;
+    ble_mem_flash_end = base + size;
+}
 
 static struct {
     uint8_t op, step;
@@ -3245,8 +3279,8 @@ static link_target_status_t arm_swd_ble_mem_start_step(uint8_t op, uint32_t addr
 link_target_status_t target_arm_swd_ble_read_flash(uint32_t addr, uint8_t *data, uint16_t count)
 {
     if (!data || !count || count > 256u ||
-        addr < BLE_MEM_FLASH_BASE || addr >= BLE_MEM_FLASH_END ||
-        count > BLE_MEM_FLASH_END - addr) return LINK_TARGET_BAD_PARAM;
+        addr < ble_mem_flash_base || addr >= ble_mem_flash_end ||
+        count > ble_mem_flash_end - addr) return LINK_TARGET_BAD_PARAM;
 
     if (!ble_mem.op) {
         if (!arm_swd_ble_mem_ready()) return LINK_TARGET_NOT_CONNECTED;
@@ -3265,8 +3299,8 @@ link_target_status_t target_arm_swd_ble_read_flash(uint32_t addr, uint8_t *data,
 
 link_target_status_t target_arm_swd_ble_write_sram(uint32_t addr, const uint8_t *data, uint16_t count)
 {
-    const uint32_t end = addr < F103_LOADER_DATA ? F103_LOADER_DATA : F103_LOADER_MAILBOX;
-    if (!data || !count || (addr & 3u) || addr < F103_LOADER_BASE || addr >= end ||
+    const uint32_t end = addr < TARGET_LOADER_DATA ? TARGET_LOADER_DATA : TARGET_LOADER_MAILBOX;
+    if (!data || !count || (addr & 3u) || addr < TARGET_LOADER_BASE || addr >= end ||
         count > end - addr || count > BLE_MEM_TAR_MASK + 1u - (addr & BLE_MEM_TAR_MASK))
         return LINK_TARGET_BAD_PARAM;
 

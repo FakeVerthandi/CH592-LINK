@@ -2,50 +2,45 @@
 #include "link_config.h"
 #include "link_ble.h"
 #include "link_session.h"
+#include "link_target_db.h"
+#include "link_target_loader.h"
 #include "target_arm_swd.h"
 #include <string.h>
-#if LINK_BLE_SRAM_WRITE
-#include "link_f103_loader.h"
-#endif
 
-#define FLASH_BASE 0x08000000u
-#define FLASH_SIZE 65536u
-#define FLASH_END (FLASH_BASE + FLASH_SIZE)
-#define PAGE_SIZE 1024u
-#define FLASH_KEYR 0x40022004u
-#define FLASH_SR 0x4002200cu
-#define FLASH_CR 0x40022010u
-#define FLASH_AR 0x40022014u
-#define FLASH_LOCK 0x80u
-#define FLASH_BSY 1u
-#define FLASH_ERRORS 0x14u
-#define FLASH_EOP 0x20u
-#define DHCSR 0xe000edf0u
-#define DEMCR 0xe000edfcu
-#define AIRCR 0xe000ed0cu
-#define DBGMCU_ID 0xe0042000u
-#define FLASH_SIZE_REG 0x1ffff7e0u
+#define DHCSR          0xe000edf0u
+#define DEMCR          0xe000edfcu
+#define AIRCR          0xe000ed0cu
+#define DBGMCU_ID      0xe0042000u
+
+#define F1_FLASH_SR    0x4002200cu
+#define F1_FLASH_CR    0x40022010u
+#define F1_FLASH_BSY   1u
+#define F1_FLASH_LOCK  0x80u
+
+#define F4_FLASH_SR    0x40023c0cu
+#define F4_FLASH_CR    0x40023c10u
+#define F4_FLASH_BSY   (1u << 16)
+#define F4_FLASH_LOCK  (1u << 31)
 
 enum { CMD_INFO = 1, CMD_ATTACH, CMD_ERASE, CMD_WRITE, CMD_READ,
        CMD_RUN, CMD_RELEASE, CMD_ABORT, CMD_DIAG, CMD_CAPS = 12, CMD_PAGE_CRC, CMD_WRITE_PROFILE };
-#define CAP_PAGE_CRC 1u
+#define CAP_PAGE_CRC      1u
+#define CAP_MULTI_TARGET  2u
+#define CAP_LOADER_ERASE  4u
+
 enum { RES_OK, RES_PARAM, RES_BUSY, RES_DETACHED, RES_TARGET,
        RES_SWD, RES_FLASH, RES_TIMEOUT, RES_ABORTED };
+
 typedef enum {
     ST_IDLE, ST_ATTACH, ST_HALT, ST_HALT_POLL, ST_DEVICE, ST_SIZE,
 #if LINK_S9_FAST_CLOCK
     ST_CHECK_CLOCK_PROFILE,
 #endif
-    ST_UNLOCK_BUSY, ST_UNLOCK_CR, ST_KEY1, ST_KEY2, ST_UNLOCK_VERIFY,
-    ST_CLEAR, ST_ERASE_PER, ST_ERASE_AR, ST_ERASE_START,
-    ST_WRITE_PG, ST_WRITE_CHECK, ST_WRITE_HALF, ST_FLASH_POLL,
-    ST_WRITE_CLEAR, ST_OP_CLEAR_CR, ST_READ,
+    ST_READ,
+    ST_LOADER, ST_LOADER_STOP,
     ST_CLEAN_POLL, ST_CLEAN_LOCK, ST_CLEAN_VERIFY,
     ST_RUN_DEMCR_READ, ST_RUN_DEMCR_WRITE, ST_RUN_RESET,
     ST_RUN_WAIT, ST_RUN_RESUME, ST_CANCEL_DRAIN
-#if LINK_BLE_SRAM_WRITE
-    , ST_LOADER, ST_LOADER_STOP, ST_LOADER_CHECK
-#endif
 } programmer_state_t;
 
 static struct {
@@ -54,6 +49,8 @@ static struct {
     uint8_t status;
     uint16_t count, offset, response_len;
     uint32_t address, deadline, detail, dpid, device, demcr;
+    const link_target_chip_desc_t *pending_desc;
+    link_target_active_t target;
     /* A WRITE owns data until completion/cleanup. Only then does finish()
      * construct its response. READ/INFO/DIAG never consume WRITE data.
      * ready prevents the next command from reusing this storage too early. */
@@ -62,11 +59,11 @@ static struct {
         uint8_t response[262];
     } buffer;
 } p;
+
 static volatile uint8_t disconnect_pending;
 /* Frozen before detach/cleanup overwrites live SWD diagnostics. Pure RAM. */
 static uint8_t failure_diag[36];
 static void capture_failure(link_target_status_t status);
-
 
 static uint16_t get16(const uint8_t *b)
 { return (uint16_t)b[0] | ((uint16_t)b[1] << 8); }
@@ -81,9 +78,28 @@ static void put32(uint8_t *b, uint32_t v)
 static void deadline(uint32_t ms) { p.deadline = link_ble_now_ms() + ms; }
 static uint8_t expired(void)
 { return (int32_t)(link_ble_now_ms() - p.deadline) >= 0; }
-static uint8_t range(uint32_t address, uint16_t count)
-{ return count && address >= FLASH_BASE && address < FLASH_END &&
-         count <= FLASH_END - address; }
+
+static uint8_t target_is_f4(void)
+{
+    return p.target.desc && p.target.desc->family == LINK_FAMILY_STM32F4;
+}
+
+static void fill_attach_response(void)
+{
+    uint16_t erase_unit = p.target.desc->erase_model == LINK_ERASE_UNIFORM_PAGE
+                          ? p.target.desc->page_bytes : 0u;
+    put32(p.buffer.response + 6, p.dpid);
+    put32(p.buffer.response + 10, p.device);
+    p.buffer.response[14] = p.target.desc->family;
+    p.buffer.response[15] = p.target.desc->erase_model;
+    p.buffer.response[16] = p.target.sector_count;
+    p.buffer.response[17] = 0u;
+    put32(p.buffer.response + 18, p.target.flash_base);
+    put16(p.buffer.response + 22, p.target.flash_kb);
+    put16(p.buffer.response + 24, p.target.sram_kb);
+    put16(p.buffer.response + 26, erase_unit);
+    p.response_len = 28;
+}
 
 static void capture_failure(link_target_status_t status)
 {
@@ -113,14 +129,16 @@ static void capture_failure(link_target_status_t status)
 
 static void detach(void)
 {
-#if LINK_BLE_SRAM_WRITE
-    link_f103_loader_reset();
-#endif
+    link_target_loader_reset();
     target_arm_swd_ble_attach_cancel();
     target_arm_swd_ble_mem_reset();
+    target_arm_swd_ble_set_flash_bounds(LINK_TARGET_FLASH_BASE, 65536u);
+    target_arm_swd_set_clock(250000u);
     target_arm_swd_disconnect();
     link_session_release(LINK_OWNER_BLE);
     p.attached = p.valid_target = 0;
+    p.pending_desc = 0;
+    memset(&p.target, 0, sizeof(p.target));
 }
 
 static void finish(void)
@@ -147,7 +165,7 @@ static void cleanup(uint8_t detach_after)
 {
     p.detach_after = detach_after;
     if (p.valid_target && link_session_owner() == LINK_OWNER_BLE) {
-        deadline(500);
+        deadline(target_is_f4() ? 5000u : 500u);
         p.state = ST_CLEAN_POLL;
     } else finish();
 }
@@ -156,19 +174,15 @@ static void fail(uint8_t status, uint32_t detail)
 {
     record_error(status, detail);
     p.response_len = 6;
-#if LINK_BLE_SRAM_WRITE
-    if (p.state == ST_LOADER || p.state == ST_LOADER_CHECK) {
-        if (link_f103_loader_stop()) p.state = ST_LOADER_STOP;
+    if (p.state == ST_LOADER) {
+        if (link_target_loader_stop()) p.state = ST_LOADER_STOP;
         else {
             p.detach_after = 1;
             finish();
         }
         return;
     }
-#endif
     if (p.state == ST_READ) {
-        /* READ did not unlock Flash. A failed posted read can leave the
-         * debug pipeline uncertain, so release it and require fresh attach. */
         p.detach_after = 1;
         finish();
     } else {
@@ -197,9 +211,8 @@ void link_ble_programmer_init(void)
     memset(&p, 0, sizeof(p));
     disconnect_pending = 0;
     target_arm_swd_ble_mem_reset();
-#if LINK_BLE_SRAM_WRITE
-    link_f103_loader_reset();
-#endif
+    target_arm_swd_ble_set_flash_bounds(LINK_TARGET_FLASH_BASE, 65536u);
+    link_target_loader_reset();
     memset(failure_diag, 0, sizeof(failure_diag));
 }
 
@@ -217,30 +230,27 @@ uint8_t link_ble_programmer_start(const uint8_t *body, uint16_t len)
     p.detach_after = 0; p.response_len = 6; p.offset = 0;
     cmd = p.cmd;
     if (!body || !len || cmd < CMD_INFO ||
-        (cmd > CMD_DIAG && !(LINK_BLE_SRAM_WRITE && (cmd == CMD_CAPS || cmd == CMD_PAGE_CRC)) &&
+        (cmd > CMD_DIAG && cmd != CMD_CAPS && cmd != CMD_PAGE_CRC &&
          !(LINK_S9_FAST_CLOCK && cmd == CMD_WRITE_PROFILE))) {
         p.status = RES_PARAM; finish(); return 1;
     }
-    if ((cmd != CMD_ERASE && cmd != CMD_WRITE && cmd != CMD_READ && cmd != CMD_PAGE_CRC && cmd != CMD_WRITE_PROFILE) && len != 1) {
+    if ((cmd != CMD_ERASE && cmd != CMD_WRITE && cmd != CMD_READ &&
+         cmd != CMD_PAGE_CRC && cmd != CMD_WRITE_PROFILE) && len != 1) {
         p.status = RES_PARAM; finish(); return 1;
     }
     if (cmd == CMD_INFO) {
-#if LINK_BLE_SRAM_WRITE
-        const uint8_t version[] = {0, 3, LINK_BLE_TWO_WRITES ? 17 : LINK_S9_FAST_CLOCK ? 16 : LINK_USB_DRW_WORD_IO ? 15 : 14, 1};
-#else
-        const uint8_t version[] = {0, 3, 10, 1};
-#endif
+        const uint8_t version[] = {0, 4, 2, 2};
+        uint16_t max_frame = LINK_BLE_TWO_WRITES ? LINK_BLE_WIDE_FRAME : 20u;
         memcpy(p.buffer.response + 6, version, 4);
-        put16(p.buffer.response + 10, 256); put16(p.buffer.response + 12, PAGE_SIZE);
-        put32(p.buffer.response + 14, FLASH_BASE); put32(p.buffer.response + 18, FLASH_SIZE);
-        p.response_len = 22; finish(); return 1;
+        put16(p.buffer.response + 10, 256u);
+        put16(p.buffer.response + 12, LINK_TARGET_VERIFY_CHUNK);
+        put16(p.buffer.response + 14, max_frame);
+        p.response_len = 16; finish(); return 1;
     }
-#if LINK_BLE_SRAM_WRITE
     if (cmd == CMD_CAPS) {
-        p.buffer.response[6] = CAP_PAGE_CRC;
+        p.buffer.response[6] = CAP_PAGE_CRC | CAP_MULTI_TARGET | CAP_LOADER_ERASE;
         p.response_len = 7; finish(); return 1;
     }
-#endif
     if (cmd == CMD_DIAG) {
         memcpy(p.buffer.response + 6, failure_diag, sizeof(failure_diag));
         p.response_len = 6 + sizeof(failure_diag); finish(); return 1;
@@ -249,12 +259,12 @@ uint8_t link_ble_programmer_start(const uint8_t *body, uint16_t len)
         if (!link_session_claim(LINK_OWNER_BLE)) {
             p.status = RES_BUSY; finish(); return 1;
         }
-        if (p.attached) {
-            /* Already attached: return its verified identity without resync. */
-            put32(p.buffer.response + 6, p.dpid); put32(p.buffer.response + 10, p.device);
-            put16(p.buffer.response + 14, 64); p.response_len = 16; finish();
+        if (p.attached && p.target.desc) {
+            fill_attach_response();
+            finish();
         } else {
             memset(failure_diag, 0, sizeof(failure_diag));
+            p.pending_desc = 0;
             target_arm_swd_ble_attach_cancel();
             target_arm_swd_ble_mem_reset();
             deadline(2000); p.state = ST_ATTACH;
@@ -264,7 +274,7 @@ uint8_t link_ble_programmer_start(const uint8_t *body, uint16_t len)
     if (cmd == CMD_ABORT && link_session_owner() != LINK_OWNER_BLE) {
         finish(); return 1;
     }
-    if (!p.attached || link_session_owner() != LINK_OWNER_BLE) {
+    if (!p.attached || !p.target.desc || link_session_owner() != LINK_OWNER_BLE) {
         p.status = RES_DETACHED; finish(); return 1;
     }
     if (cmd == CMD_RELEASE || cmd == CMD_ABORT || cmd == CMD_RUN) {
@@ -277,56 +287,60 @@ uint8_t link_ble_programmer_start(const uint8_t *body, uint16_t len)
             p.status = RES_PARAM; finish(); return 1;
         }
         target_arm_swd_set_clock(body[1] ? body[1] * 1000000u : 250000u);
-        /* Older R6 clients validate this field against their 64-byte limit. */
         p.buffer.response[6] = len == 3 ? LINK_BLE_WIDE_FRAME : 64u;
         p.state = ST_CHECK_CLOCK_PROFILE;
         return 1;
     }
 #endif
-#if LINK_BLE_SRAM_WRITE
     if (cmd == CMD_PAGE_CRC) {
         if (len != 5) { p.status = RES_PARAM; finish(); return 1; }
         p.address = get32(body + 1);
-        if (!range(p.address, PAGE_SIZE) || (p.address & (PAGE_SIZE - 1u))) {
+        if (!link_target_db_range_ok(&p.target, p.address, LINK_TARGET_VERIFY_CHUNK) ||
+            (p.address & (LINK_TARGET_VERIFY_CHUNK - 1u))) {
             p.status = RES_PARAM; finish(); return 1;
         }
-        link_f103_loader_verify_begin(p.address);
+        link_target_loader_verify_begin(&p.target, p.address);
         p.state = ST_LOADER;
         return 1;
     }
-#endif
-    if ((cmd == CMD_ERASE && len != 5) ||
-        (cmd == CMD_WRITE && (len < 7 || len > 261 || ((len - 5u) & 1u))) ||
-        (cmd == CMD_READ && len != 7)) {
-        p.status = RES_PARAM; finish(); return 1;
+    if (cmd == CMD_ERASE) {
+        uint32_t unit_bytes = 0;
+        uint8_t sector_num = 0;
+        if (len != 5) { p.status = RES_PARAM; finish(); return 1; }
+        p.address = get32(body + 1);
+        if (!link_target_db_erase_unit(&p.target, p.address, &unit_bytes, &sector_num)) {
+            p.status = RES_PARAM; finish(); return 1;
+        }
+        link_target_loader_erase_begin(&p.target, p.address, unit_bytes, sector_num);
+        p.state = ST_LOADER;
+        return 1;
     }
-    p.address = get32(body + 1);
-    p.count = cmd == CMD_ERASE ? PAGE_SIZE :
-              cmd == CMD_READ ? get16(body + 5) : len - 5;
-    if (!range(p.address, p.count) ||
-        (cmd == CMD_ERASE && (p.address & (PAGE_SIZE - 1u))) ||
-        (cmd != CMD_ERASE && p.count > 256) ||
-        (cmd == CMD_WRITE && ((p.address & 1u) ||
-         (p.address & (PAGE_SIZE - 1u)) + p.count > PAGE_SIZE))) {
-        p.status = RES_PARAM; finish(); return 1;
+    if (cmd == CMD_WRITE) {
+        if (len < 7 || len > 261 || ((len - 5u) & 1u)) {
+            p.status = RES_PARAM; finish(); return 1;
+        }
+        p.address = get32(body + 1);
+        p.count = (uint16_t)(len - 5u);
+        if (!link_target_db_write_ok(&p.target, p.address, p.count)) {
+            p.status = RES_PARAM; finish(); return 1;
+        }
+        memcpy(p.buffer.data, body + 5, p.count);
+        link_target_loader_write_begin(&p.target, p.address, p.buffer.data, p.count);
+        p.state = ST_LOADER;
+        return 1;
     }
     if (cmd == CMD_READ) {
-        p.response_len = 6 + p.count; p.state = ST_READ;
-    } else {
-        if (cmd == CMD_WRITE) memcpy(p.buffer.data, body + 5, p.count);
-#if LINK_BLE_SRAM_WRITE
-        if (cmd == CMD_WRITE) {
-            link_f103_loader_begin(p.address, p.buffer.data, p.count);
-            p.state = ST_LOADER;
-        } else {
-            link_f103_loader_check_begin(p.address);
-            p.state = ST_LOADER_CHECK;
+        if (len != 7) { p.status = RES_PARAM; finish(); return 1; }
+        p.address = get32(body + 1);
+        p.count = get16(body + 5);
+        if (!p.count || p.count > 256u || !link_target_db_range_ok(&p.target, p.address, p.count)) {
+            p.status = RES_PARAM; finish(); return 1;
         }
-#else
-        deadline(500); p.state = ST_UNLOCK_BUSY;
-#endif
+        p.response_len = (uint16_t)(6u + p.count);
+        p.state = ST_READ;
+        return 1;
     }
-    return 1;
+    p.status = RES_PARAM; finish(); return 1;
 }
 
 void link_ble_programmer_poll(void)
@@ -350,8 +364,6 @@ void link_ble_programmer_poll(void)
     case ST_CHECK_CLOCK_PROFILE:
         s = target_arm_swd_ble_read32(DHCSR, &value);
         if (s == LINK_SWD_PENDING) break;
-        /* S_RESET_ST is clear-on-read. A reset invalidates the cached
-         * loader and CPU context even when the core has halted again. */
         if (s != LINK_TARGET_OK || !(value & (1u << 17)) || !(value & 1u) ||
             (value & ((1u << 25) | (1u << 19)))) {
             target_arm_swd_set_clock(250000u);
@@ -387,139 +399,89 @@ void link_ble_programmer_poll(void)
         break;
     case ST_DEVICE:
         if (!swd_ok(target_arm_swd_ble_read32(DBGMCU_ID, &p.device), DBGMCU_ID)) break;
-        if ((p.device & 0xfffu) != 0x410u) fail(RES_TARGET, DBGMCU_ID);
+        p.pending_desc = link_target_db_find((uint16_t)(p.device & 0xfffu));
+        if (!p.pending_desc) fail(RES_TARGET, p.device);
         else p.state = ST_SIZE;
         break;
-    case ST_SIZE:
-        if (!swd_ok(target_arm_swd_ble_read32(FLASH_SIZE_REG, &value), FLASH_SIZE_REG)) break;
-        if ((value & 0xffffu) != 64u) { fail(RES_TARGET, FLASH_SIZE_REG); break; }
+    case ST_SIZE: {
+        uint32_t reg_addr = p.pending_desc->flash_size_reg;
+        uint32_t aligned_addr = reg_addr & ~3u;
+        uint16_t flash_kb;
+        if (!swd_ok(target_arm_swd_ble_read32(aligned_addr, &value), reg_addr)) break;
+        flash_kb = (uint16_t)((reg_addr & 2u) ? (value >> 16) : value);
+        if (!link_target_db_init_active(p.pending_desc, flash_kb, &p.target)) {
+            fail(RES_TARGET, ((uint32_t)p.pending_desc->dev_id << 16) | flash_kb);
+            break;
+        }
+        target_arm_swd_ble_set_flash_bounds(p.target.flash_base, p.target.flash_bytes);
         p.attached = p.valid_target = 1;
-        put32(p.buffer.response + 6, p.dpid); put32(p.buffer.response + 10, p.device);
-        put16(p.buffer.response + 14, 64); p.response_len = 16; finish();
+        fill_attach_response();
+        finish();
         break;
-    case ST_UNLOCK_BUSY:
-        if (!swd_ok(target_arm_swd_ble_read32(FLASH_SR, &value), FLASH_SR)) break;
-        if (!(value & FLASH_BSY)) p.state = ST_UNLOCK_CR;
-        else if (expired()) fail(RES_TIMEOUT, p.address);
-        break;
-    case ST_UNLOCK_CR:
-        if (swd_ok(target_arm_swd_ble_read32(FLASH_CR, &value), FLASH_CR))
-            p.state = value & FLASH_LOCK ? ST_KEY1 : ST_CLEAR;
-        break;
-    case ST_KEY1:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_KEYR, 0x45670123u), FLASH_KEYR)) p.state = ST_KEY2;
-        break;
-    case ST_KEY2:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_KEYR, 0xcdef89abu), FLASH_KEYR)) p.state = ST_UNLOCK_VERIFY;
-        break;
-    case ST_UNLOCK_VERIFY:
-        if (!swd_ok(target_arm_swd_ble_read32(FLASH_CR, &value), FLASH_CR)) break;
-        if (value & FLASH_LOCK) fail(RES_FLASH, p.address);
-        else p.state = ST_CLEAR;
-        break;
-    case ST_CLEAR:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_SR, FLASH_EOP | FLASH_ERRORS), FLASH_SR))
-            p.state = p.cmd == CMD_ERASE ? ST_ERASE_PER : ST_WRITE_PG;
-        break;
-    case ST_ERASE_PER:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_CR, 2), FLASH_CR)) p.state = ST_ERASE_AR;
-        break;
-    case ST_ERASE_AR:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_AR, p.address), FLASH_AR)) p.state = ST_ERASE_START;
-        break;
-    case ST_ERASE_START:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_CR, 0x42), FLASH_CR)) {
-            deadline(500); p.state = ST_FLASH_POLL;
-        }
-        break;
-    case ST_WRITE_PG:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_CR, 1), FLASH_CR)) p.state = ST_WRITE_CHECK;
-        break;
-    case ST_WRITE_CHECK:
-        if (!swd_ok(target_arm_swd_ble_read32((p.address + p.offset) & ~3u, &value), p.address + p.offset)) break;
-        if (((value >> (((p.address + p.offset) & 2u) * 8u)) & 0xffffu) != 0xffffu) {
-            fail(RES_FLASH, p.address + p.offset); break;
-        }
-        p.state = ST_WRITE_HALF;
-        break;
-    case ST_WRITE_HALF:
-        if (swd_ok(target_arm_swd_ble_write16(p.address + p.offset, get16(p.buffer.data + p.offset)), p.address + p.offset)) {
-            deadline(100); p.state = ST_FLASH_POLL;
-        }
-        break;
-    case ST_FLASH_POLL:
-        if (!swd_ok(target_arm_swd_ble_read32(FLASH_SR, &value), p.address + p.offset)) break;
-        if (!(value & FLASH_BSY)) {
-            if (value & FLASH_ERRORS) fail(RES_FLASH, p.address + p.offset);
-            else if (value & FLASH_EOP) p.state = ST_WRITE_CLEAR;
-            else if (expired()) fail(RES_TIMEOUT, p.address + p.offset);
-        } else if (expired()) fail(RES_TIMEOUT, p.address + p.offset);
-        break;
-    case ST_WRITE_CLEAR:
-        if (!swd_ok(target_arm_swd_ble_write32(FLASH_SR, FLASH_EOP | FLASH_ERRORS), FLASH_SR)) break;
-        if (p.cmd == CMD_WRITE && (p.offset += 2) < p.count) p.state = ST_WRITE_CHECK;
-        else p.state = ST_OP_CLEAR_CR;
-        break;
-    case ST_OP_CLEAR_CR:
-        if (swd_ok(target_arm_swd_ble_write32(FLASH_CR, FLASH_LOCK), FLASH_CR)) finish();
-        break;
+    }
     case ST_READ:
         if (swd_ok(target_arm_swd_ble_read_flash(p.address, p.buffer.response + 6, p.count), p.address))
             finish();
         break;
-#if LINK_BLE_SRAM_WRITE
-    case ST_LOADER:
-    case ST_LOADER_CHECK: {
+    case ST_LOADER: {
         uint32_t detail, crc = 0;
-        s = link_f103_loader_poll(&detail, &crc);
-        if (s == LINK_F103_FLASH_ERROR) fail(RES_FLASH, detail);
-        else if (s == LINK_F103_BAD_STATE) fail(RES_TARGET, detail);
+        s = link_target_loader_poll(&detail, &crc);
+        if (s == LINK_LOADER_FLASH_ERROR) fail(RES_FLASH, detail);
+        else if (s == LINK_LOADER_BAD_STATE) fail(RES_TARGET, detail);
         else if (swd_ok(s, detail)) {
-            if (p.state == ST_LOADER_CHECK) {
-                deadline(500); p.state = ST_UNLOCK_BUSY;
-            } else {
-                if (p.cmd == CMD_PAGE_CRC) {
-                    put32(p.buffer.response + 6, crc);
-                    p.response_len = 10;
-                }
-                finish();
+            if (p.cmd == CMD_PAGE_CRC) {
+                put32(p.buffer.response + 6, crc);
+                p.response_len = 10;
             }
+            finish();
         }
         break;
     }
     case ST_LOADER_STOP:
-        s = link_f103_loader_stop_poll();
+        s = link_target_loader_stop_poll();
         if (s == LINK_SWD_PENDING) break;
-        if (s == LINK_TARGET_OK && p.cmd == CMD_PAGE_CRC) { p.detach_after = 1; finish(); }
-        else if (s == LINK_TARGET_OK) cleanup(1);
+        if (s == LINK_TARGET_OK && (p.cmd == CMD_PAGE_CRC || p.status == RES_TARGET)) {
+            p.detach_after = 1; finish();
+        } else if (s == LINK_TARGET_OK) cleanup(1);
         else {
             record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : RES_SWD, DHCSR);
             p.detach_after = 1; finish();
         }
         break;
-#endif
-    case ST_CLEAN_POLL:
-        s = target_arm_swd_ble_read32(FLASH_SR, &value);
+    case ST_CLEAN_POLL: {
+        uint32_t sr_addr = target_is_f4() ? F4_FLASH_SR : F1_FLASH_SR;
+        uint32_t bsy_bit = target_is_f4() ? F4_FLASH_BSY : F1_FLASH_BSY;
+        s = target_arm_swd_ble_read32(sr_addr, &value);
         if (s == LINK_SWD_PENDING) break;
-        if (s != LINK_TARGET_OK) { record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : RES_SWD, FLASH_SR); p.detach_after = 1; finish(); }
-        else if (!(value & FLASH_BSY)) p.state = ST_CLEAN_LOCK;
-        else if (expired()) { record_error(RES_TIMEOUT, FLASH_SR); p.detach_after = 1; finish(); }
+        if (s != LINK_TARGET_OK || value == 0xffffffffu) {
+            record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : RES_SWD, sr_addr);
+            p.detach_after = 1; finish();
+        }
+        else if (!(value & bsy_bit)) p.state = ST_CLEAN_LOCK;
+        else if (expired()) { record_error(RES_TIMEOUT, sr_addr); p.detach_after = 1; finish(); }
         break;
-    case ST_CLEAN_LOCK:
-        s = target_arm_swd_ble_write32(FLASH_CR, FLASH_LOCK);
+    }
+    case ST_CLEAN_LOCK: {
+        uint32_t cr_addr = target_is_f4() ? F4_FLASH_CR : F1_FLASH_CR;
+        uint32_t lock_bit = target_is_f4() ? F4_FLASH_LOCK : F1_FLASH_LOCK;
+        s = target_arm_swd_ble_write32(cr_addr, lock_bit);
         if (s == LINK_SWD_PENDING) break;
-        if (s != LINK_TARGET_OK) { record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : RES_SWD, FLASH_CR); p.detach_after = 1; finish(); }
+        if (s != LINK_TARGET_OK) { record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : RES_SWD, cr_addr); p.detach_after = 1; finish(); }
         else p.state = ST_CLEAN_VERIFY;
         break;
-    case ST_CLEAN_VERIFY:
-        s = target_arm_swd_ble_read32(FLASH_CR, &value);
+    }
+    case ST_CLEAN_VERIFY: {
+        uint32_t cr_addr = target_is_f4() ? F4_FLASH_CR : F1_FLASH_CR;
+        uint32_t lock_bit = target_is_f4() ? F4_FLASH_LOCK : F1_FLASH_LOCK;
+        s = target_arm_swd_ble_read32(cr_addr, &value);
         if (s == LINK_SWD_PENDING) break;
-        if (s != LINK_TARGET_OK || !(value & FLASH_LOCK)) {
-            record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : s != LINK_TARGET_OK ? RES_SWD : RES_FLASH, FLASH_CR);
+        if (s != LINK_TARGET_OK || !(value & lock_bit)) {
+            record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : s != LINK_TARGET_OK ? RES_SWD : RES_FLASH, cr_addr);
             p.detach_after = 1; finish();
         } else if (p.cmd == CMD_RUN && !p.suppress && p.status == RES_OK) p.state = ST_RUN_DEMCR_READ;
         else finish();
         break;
+    }
     case ST_RUN_DEMCR_READ:
         if (swd_ok(target_arm_swd_ble_read32(DEMCR, &p.demcr), DEMCR)) p.state = ST_RUN_DEMCR_WRITE;
         break;
@@ -528,7 +490,6 @@ void link_ble_programmer_poll(void)
         break;
     case ST_RUN_RESET:
         if (swd_ok(target_arm_swd_ble_write32(AIRCR, 0x05fa0004u), AIRCR)) {
-            /* Reset may release the halt; Flash is already locked. */
             p.valid_target = 0; deadline(20); p.state = ST_RUN_WAIT;
         }
         break;
@@ -538,13 +499,11 @@ void link_ble_programmer_poll(void)
     case ST_CANCEL_DRAIN:
         s = target_arm_swd_ble_mem_cancel_poll();
         if (s == LINK_SWD_PENDING) break;
-#if LINK_BLE_SRAM_WRITE
-        if (link_f103_loader_stop()) {
+        if (link_target_loader_stop()) {
             if (s != LINK_TARGET_OK) record_error(s == LINK_SWD_TIMEOUT ? RES_TIMEOUT : RES_SWD, p.address);
             p.state = ST_LOADER_STOP;
             break;
         }
-#endif
         if (s == LINK_TARGET_OK && p.cmd == CMD_PAGE_CRC) { p.detach_after = 1; finish(); }
         else if (s == LINK_TARGET_OK) cleanup(1);
         else {

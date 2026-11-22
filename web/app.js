@@ -40,11 +40,36 @@
   function reportError(error){const e=error instanceof B.ProtocolError?error:S.classify(error);status(e.message,true);if(lastMessage!==e.message)log(e.message);}
   function drop(reason,s=activeSession||controller.current){return controller.close(s,reason instanceof Error?reason:new S.SessionError('CANCELLED',reason));}
   async function action(fn){if(busy)return;const id=++actionId;busy=true;sync();try{await fn();}catch(error){if(id===actionId)reportError(error);}finally{if(id===actionId){busy=false;sync();}}}
+  function renderImageInfo() {
+    if (!image) { $('image').textContent = '尚未选择文件'; return {mismatch: false, reasons: []}; }
+    const target = programmer?.target || null;
+    if (target) {
+      const plan = B.planImageForTarget(image, target);
+      const check = B.detectTargetMismatch(image, target);
+      const isSector = target.eraseModel === B.ERASE_MODEL.STM32F4_SINGLE;
+      const warn = check.mismatch ? `\n警告：${check.reasons.join('；')}` : '';
+      $('image').textContent = `${image.name}\n${image.count} 有效字节 · 擦除 ${plan.eraseUnits.length} ${isSector ? '扇区' : '页'} / ${plan.eraseBytes / 1024}KiB · ${plan.verifyBlocks.length} 个校验块\n${B.hex(B.BASE + image.min)} ～ ${B.hex(B.BASE + image.max - 1)}\n初始 SP ${B.hex(image.sp)} · Reset ${B.hex(image.reset)}${warn}`;
+      return check;
+    } else {
+      $('image').textContent = `${image.name}\n${image.count} 有效字节 · ${image.pages.length} 个 1KiB 块（连接目标后按芯片模型计算擦除单元）\n${B.hex(B.BASE + image.min)} ～ ${B.hex(B.BASE + image.max - 1)}\n初始 SP ${B.hex(image.sp)} · Reset ${B.hex(image.reset)}`;
+      return {mismatch: false, reasons: []};
+    }
+  }
   async function attachTarget(){
     const s=activeSession,p=programmer;controller.check(s);status('正在通过 SWD 识别 STM32 目标…');
     const target=await controller.stage(s,'通过 SWD 识别目标',()=>p.attach(),15000);controller.check(s);
-    $('device').textContent=`${device.name||'CH592 LINK'} · BLE ${probeInfo.version}\nDP ${B.hex(target.dpid)} / DBGMCU ${B.hex(target.deviceid)}\nSTM32F103C8T6 · ${target.flashKB}KiB Flash · 已停机`;
-    status('目标识别通过，可选择固件并烧录。');
+    const devHex='0x'+target.devId.toString(16).toUpperCase().padStart(3,'0');
+    $('device').textContent=`${device.name||'CH592 LINK'} · BLE ${probeInfo.version}\nDP ${B.hex(target.dpid)} / DBGMCU ${B.hex(target.deviceid)}\n${target.familyName} (DEV ${devHex}) · ${target.flashKB}KiB Flash / ${target.sramKB}KiB SRAM · ${target.eraseSummary} · 已停机`;
+    if(image){
+      try{
+        const check=renderImageInfo();
+        if(check.mismatch){ status('检测到固件与当前芯片系列不匹配，请核对后再烧录。',true); log('防烧错警告：'+check.reasons.join('；')); }
+        else status('目标识别与已选固件校验通过，可开始烧录。');
+      }
+      catch(err){ $('image').textContent=err.message; status(err.message,true); log('已选固件与当前目标不匹配：'+err.message); image=null; }
+    } else {
+      status('目标识别通过，可选择固件并烧录。');
+    }
   }
   async function connectDevice(selected){
     connecting=true;let s;sync();
@@ -58,8 +83,8 @@
         controller.close(s,error);
       }});transport=t;
       const info=B.decodeInfo(await controller.stage(s,'读取固件版本',()=>t.request(B.CMD.INFO)));controller.check(s);probeInfo=info;features=S.protocolFeatures(info);
-      features.writeProfile=info.protocol===1&&S.versionAtLeast(info.version,[0,3,16]);
-      features.twoWrites=features.writeProfile&&S.versionAtLeast(info.version,[0,3,17])&&s.capabilities.writeAPI==='writeValueWithResponse';
+      features.writeProfile=info.protocol===2||(info.protocol===1&&S.versionAtLeast(info.version,[0,3,16]));
+      features.twoWrites=features.writeProfile&&(info.protocol===2||S.versionAtLeast(info.version,[0,3,17]))&&s.capabilities.writeAPI==='writeValueWithResponse';
       if(twoWritesSelected()&&!features.twoWrites)$('write-mode').value='safe';
       updateTransfer();
       $('device').textContent=`${device.name||'CH592 LINK'} · BLE ${info.version} · 协议 ${info.protocol}\n蓝牙已连接，正在识别 SWD 目标`;
@@ -127,21 +152,35 @@
     const generation=++fileGeneration,file=event.target.files[0];image=null;if(programmer)programmer.readback=null;sync();
     if (!file) { $('image').textContent = '尚未选择文件'; sync(); return; }
     try {
-      if (file.size > 2 * 1024 * 1024) throw Error('固件文件超过 2MiB 解析上限');
-      if (/\.bin$/i.test(file.name) && file.size > B.SIZE) throw Error('BIN 超过 STM32F103C8T6 的 64KiB Flash 范围');
+      if (file.size > 4 * 1024 * 1024) throw Error('固件文件超过 4MiB 解析上限');
+      const target = programmer?.target || null;
+      const maxBin = target ? target.flashBytes : B.MAX_FLASH;
+      if (/\.bin$/i.test(file.name) && file.size > maxBin) throw Error(`BIN 超过 ${maxBin / 1024}KiB Flash 范围`);
       let parsed;
-      if (/\.(hex|ihex)$/i.test(file.name)) parsed = B.parseHex(await file.text(), file.name);
-      else if (/\.bin$/i.test(file.name)) parsed = B.parseBin(await file.arrayBuffer(), file.name);
+      if (/\.(hex|ihex)$/i.test(file.name)) parsed = B.parseHex(await file.text(), file.name, target);
+      else if (/\.bin$/i.test(file.name)) parsed = B.parseBin(await file.arrayBuffer(), file.name, target);
       else throw Error('只接受 .bin、.hex 或 .ihex 固件文件');
       if(generation!==fileGeneration)return;image=parsed;
-      $('image').textContent = `${file.name}\n${image.count} 有效字节 · ${image.pages.length} 页 / ${image.pages.length * B.PAGE} 擦除字节\n${B.hex(B.BASE + image.min)} ～ ${B.hex(B.BASE + image.max - 1)}\n初始 SP ${B.hex(image.sp)} · Reset ${B.hex(image.reset)}`;
-      log(`文件解析与向量检查通过：${file.name}，${image.count} 字节`); status('固件检查通过，可开始烧录。');
+      const check=renderImageInfo();
+      if(check.mismatch){
+        log(`防烧错警告（${file.name}）：${check.reasons.join('；')}`);
+        status('检测到固件与当前芯片系列不匹配，请核对后再烧录。',true);
+      } else {
+        log(`文件解析与向量检查通过：${file.name}，${image.count} 字节`); status('固件检查通过，可开始烧录。');
+      }
     } catch (error) { if(generation!==fileGeneration)return;$('image').textContent = error.message; status(error.message, true); log(error.message); }
     sync();
   });
   $('flash').addEventListener('click', () => action(async () => {
     const s=activeSession,p=programmer,selectedImage=image;controller.check(s);
     if(!selectedImage)throw Error('请先选择并完成固件解析');
+    const check=B.detectTargetMismatch(selectedImage,p.target);
+    if(check.mismatch){
+      const msg=`固件与当前目标芯片疑似不匹配：\n\n- ${check.reasons.join('\n- ')}\n\n确认继续烧录吗？`;
+      log('防烧错拦截：'+check.reasons.join('；'));
+      if(!window.confirm(msg)){ status('已取消烧录：固件与目标芯片不匹配。',true); return; }
+      log('已手动确认忽略不匹配警告，继续烧录');
+    }
     await applyWriteProfile(p,s);
     if((transport.fastData||twoWritesSelected())&&!transport.fastQualified){status('正在检查传输；通过后自动开始擦写…');$('stage').textContent='检查传输';await p.testTransfer();controller.check(s);}
     const task = p.flash(selectedImage, {verify:$('strict-verify').checked?'full':'auto'}); sync(); await task;
@@ -171,7 +210,7 @@
       $('environment').textContent = available === false ? '浏览器未发现可用蓝牙适配器。请检查蓝牙和浏览器权限后再选择设备。' : 'Web Bluetooth 可用。请保持蓝牙开启，选择运行 CH592 LINK 协议固件的设备。';
       $('environment').classList.toggle('error', available === false);
     } catch (error) { $('environment').textContent = '蓝牙能力检查失败：' + error.message; $('environment').classList.add('error'); }
-    log('页面就绪（WEB R6）。默认保守发送；支持时使用 STM32 页 CRC32；完整读回可手动选择；擦写不自动重试。'); sync();
+    log('页面就绪（WEB 0.4.2 / 协议 v2）。默认保守发送；支持时使用目标端 1KiB 块 CRC32；完整读回可手动选择；擦写不自动重试。'); sync();
   }
   window.addEventListener?.('pagehide', () => controller.dispose());
   sync(); checkEnvironment();

@@ -12,11 +12,16 @@
 #if LINK_BLE_ENABLE
 #include "link_session.h"
 #include "link_ble.h"
-static volatile uint8_t cherry_pending;
+#define LINK_USB_RX_Q 3u
+#define LINK_USB_TX_Q 2u
+__attribute__((aligned(4))) static uint8_t cherry_rx_q[LINK_USB_RX_Q][64];
+static uint8_t cherry_rx_len[LINK_USB_RX_Q];
+static volatile uint8_t cherry_rx_head, cherry_rx_tail, cherry_rx_count, cherry_rx_armed;
+__attribute__((aligned(4))) static uint8_t cherry_tx_q[LINK_USB_TX_Q][64];
+static uint8_t cherry_tx_len_q[LINK_USB_TX_Q];
+static volatile uint8_t cherry_tx_head, cherry_tx_tail, cherry_tx_count;
 static volatile uint8_t cherry_reset_pending;
-static uint8_t cherry_work_buf[64];
 static volatile uint8_t cherry_epoch;
-static uint8_t cherry_work_epoch;
 #endif
 #if LINK_USB_PROFILE_TIMING
 #include "link_timing.h"
@@ -48,8 +53,10 @@ static uint8_t cherry_work_epoch;
 #define LINK_USB_CHERRY_TRACE_BYTES 28
 #define LINK_USB_CHERRY_TRACE_RECORD_WIRE_SIZE (4 + LINK_USB_CHERRY_TRACE_BYTES + LINK_USB_CHERRY_TRACE_BYTES)
 
+#if !LINK_BLE_ENABLE
 __attribute__((aligned(4))) static uint8_t cherry_rx_buf[LINK_USB_CHERRY_EP_MPS];
 __attribute__((aligned(4))) static uint8_t cherry_tx_buf[LINK_USB_CHERRY_EP_MPS];
+#endif
 static volatile bool cherry_tx_busy;
 link_perf_counters_t link_perf_counters;
 
@@ -418,105 +425,96 @@ static void cherry_out_callback(uint8_t busid, uint8_t ep, uint32_t nbytes)
 }
 
 #else
-static void cherry_complete_out(uint8_t busid, uint8_t tx_len, uint8_t processing_epoch)
+static uint8_t cherry_dispatch_packet(const uint8_t *request, uint8_t nbytes,
+                                      uint8_t *tx_buf, uint8_t tx_cap)
 {
-    uint32_t usb_irq_enabled = PFIC_GetStatusIRQ(USB_IRQn);
-    /* Epoch validation and endpoint handoff form one short USB-only critical
-     * section. Radio IRQs remain enabled throughout. */
-    PFIC_DisableIRQ(USB_IRQn);
-    if (cherry_epoch == processing_epoch && !cherry_reset_pending) {
-        if (tx_len > 0) {
-            cherry_tx_busy = true;
-            if (usbd_ep_start_write(busid, LINK_USB_CHERRY_EP_IN, cherry_tx_buf, tx_len) < 0) {
-                cherry_tx_busy = false;
-                usbd_ep_start_read(busid, LINK_USB_CHERRY_EP_OUT, cherry_rx_buf, sizeof(cherry_rx_buf));
-            }
-        } else {
-            usbd_ep_start_read(busid, LINK_USB_CHERRY_EP_OUT, cherry_rx_buf, sizeof(cherry_rx_buf));
-        }
-    }
-    if (usb_irq_enabled) PFIC_EnableIRQ(USB_IRQn);
-}
+    uint8_t tx_len;
 
-static void cherry_process_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
-{
-#if LINK_BLE_ENABLE
-    uint8_t processing_epoch=cherry_work_epoch;
-    const uint8_t *request=cherry_work_buf;
-    if (processing_epoch != cherry_epoch || cherry_reset_pending) return;
-#else
-    const uint8_t *request=cherry_rx_buf;
-#endif
-    (void)ep;
     if (nbytes > LINK_USB_CHERRY_EP_MPS) {
         nbytes = LINK_USB_CHERRY_EP_MPS;
     }
-    if (nbytes > 0) {
-        uint8_t tx_len;
-
-        if (request[0] == LINK_USB_CHERRY_TRACE_CMD) {
-            tx_len = cherry_trace_read(request, (uint8_t)nbytes, cherry_tx_buf, sizeof(cherry_tx_buf));
-        } else if (request[0] == LINK_USB_CHERRY_DIAG_CMD) {
-            tx_len = cherry_diag_read(cherry_tx_buf, sizeof(cherry_tx_buf));
-        } else if (request[0] == LINK_USB_CHERRY_PERF_CMD) {
-            tx_len = cherry_perf_read(request, (uint8_t)nbytes, cherry_tx_buf, sizeof(cherry_tx_buf));
-        } else if (request[0] == 0x84u) {
-            tx_len = link_ble_usb_diag(cherry_tx_buf,sizeof(cherry_tx_buf));
-#if LINK_BLE_ENABLE
-        } else if (request[0] == 0x85u) {
-            tx_len = link_ble_usb_rx_diag(cherry_tx_buf,sizeof(cherry_tx_buf));
-#endif
-#if LINK_USB_PROFILE_TIMING
-        } else if (request[0] == 0x83u) {
-            tx_len = link_timing_read(request, (uint8_t)nbytes, cherry_tx_buf, sizeof(cherry_tx_buf));
-#endif
-        } else {
-#if LINK_USB_PROFILE_TIMING
-            uint32_t timing_start = link_timing_now();
-            target_arm_swd_debug_diag_t timing_context;
-            target_arm_swd_get_debug_diag(&timing_context);
-#endif
-            if (request[0] == 0x02u) {
-                memset(&link_perf_counters, 0, sizeof(link_perf_counters));
-            }
-            LINK_PERF_INC(dap_packets);
-            tx_len = cmsis_dap_process_packet(request, (uint16_t)nbytes,
-                                              cherry_tx_buf, sizeof(cherry_tx_buf));
-            cherry_trace_log(request, (uint8_t)nbytes, cherry_tx_buf, tx_len);
-#if LINK_USB_PROFILE_TIMING
-            link_timing_record(request, (uint8_t)nbytes, cherry_tx_buf, tx_len,
-                               timing_start, timing_context.mem_ap_tar);
-#endif
-        }
-
-        cherry_complete_out(busid, tx_len, processing_epoch);
-        return;
+    if (nbytes == 0u) {
+        return 0u;
     }
-    cherry_complete_out(busid, 0, processing_epoch);
+
+    if (request[0] == LINK_USB_CHERRY_TRACE_CMD) {
+        tx_len = cherry_trace_read(request, nbytes, tx_buf, tx_cap);
+    } else if (request[0] == LINK_USB_CHERRY_DIAG_CMD) {
+        tx_len = cherry_diag_read(tx_buf, tx_cap);
+    } else if (request[0] == LINK_USB_CHERRY_PERF_CMD) {
+        tx_len = cherry_perf_read(request, nbytes, tx_buf, tx_cap);
+    } else if (request[0] == 0x84u) {
+        tx_len = link_ble_usb_diag(tx_buf, tx_cap);
+    } else if (request[0] == 0x85u) {
+        tx_len = link_ble_usb_rx_diag(tx_buf, tx_cap);
+#if LINK_USB_PROFILE_TIMING
+    } else if (request[0] == 0x83u) {
+        tx_len = link_timing_read(request, nbytes, tx_buf, tx_cap);
+#endif
+    } else {
+#if LINK_USB_PROFILE_TIMING
+        uint32_t timing_start = link_timing_now();
+        target_arm_swd_debug_diag_t timing_context;
+        target_arm_swd_get_debug_diag(&timing_context);
+#endif
+        if (request[0] == 0x02u) {
+            memset(&link_perf_counters, 0, sizeof(link_perf_counters));
+        }
+        LINK_PERF_INC(dap_packets);
+        tx_len = cmsis_dap_process_packet(request, (uint16_t)nbytes, tx_buf, tx_cap);
+        cherry_trace_log(request, nbytes, tx_buf, tx_len);
+#if LINK_USB_PROFILE_TIMING
+        link_timing_record(request, nbytes, tx_buf, tx_len,
+                           timing_start, timing_context.mem_ap_tar);
+#endif
+    }
+    return tx_len;
 }
 
 static void cherry_out_callback(uint8_t busid, uint8_t ep, uint32_t nbytes)
 {
-#if LINK_BLE_ENABLE
-    (void)busid; (void)ep;
+    (void)ep;
     if (nbytes > LINK_USB_CHERRY_EP_MPS) nbytes = LINK_USB_CHERRY_EP_MPS;
-    /* OUT remains NAK until response completes: buffer cannot be overwritten. */
-    cherry_pending = (uint8_t)nbytes;
-    if (!nbytes) usbd_ep_start_read(busid, LINK_USB_CHERRY_EP_OUT, cherry_rx_buf, sizeof(cherry_rx_buf));
-#else
-    cherry_process_out(busid, ep, nbytes);
-#endif
+    if (nbytes > 0u && cherry_rx_count < LINK_USB_RX_Q) {
+        cherry_rx_len[cherry_rx_head] = (uint8_t)nbytes;
+        cherry_rx_head = (uint8_t)((cherry_rx_head + 1u) % LINK_USB_RX_Q);
+        cherry_rx_count++;
+    }
+    if (cherry_rx_count < LINK_USB_RX_Q) {
+        cherry_rx_armed = 1u;
+        usbd_ep_start_read(busid, LINK_USB_CHERRY_EP_OUT,
+                           cherry_rx_q[cherry_rx_head], LINK_USB_CHERRY_EP_MPS);
+    } else {
+        cherry_rx_armed = 0u;
+    }
 }
 
 #endif
 
 static void cherry_in_callback(uint8_t busid, uint8_t ep, uint32_t nbytes)
 {
-    (void)busid;
     (void)ep;
     (void)nbytes;
+#if LINK_BLE_ENABLE
+    if (cherry_tx_count > 0u) {
+        cherry_tx_tail = (uint8_t)((cherry_tx_tail + 1u) % LINK_USB_TX_Q);
+        cherry_tx_count--;
+    }
+    if (cherry_tx_count > 0u) {
+        if (usbd_ep_start_write(busid, LINK_USB_CHERRY_EP_IN,
+                                cherry_tx_q[cherry_tx_tail],
+                                cherry_tx_len_q[cherry_tx_tail]) < 0) {
+            cherry_tx_busy = false;
+            cherry_tx_count = 0u;
+            cherry_tx_head = cherry_tx_tail = 0u;
+        }
+    } else {
+        cherry_tx_busy = false;
+    }
+#else
     cherry_tx_busy = false;
     usbd_ep_start_read(busid, LINK_USB_CHERRY_EP_OUT, cherry_rx_buf, sizeof(cherry_rx_buf));
+#endif
 }
 
 static struct usbd_interface cherry_intf;
@@ -535,15 +533,28 @@ static void cherry_event_handler(uint8_t busid, uint8_t event)
 {
 #if LINK_BLE_ENABLE
     if (event == USBD_EVENT_RESET || event == USBD_EVENT_DISCONNECTED) {
-        cherry_pending = 0;
+        cherry_rx_head = cherry_rx_tail = cherry_rx_count = 0u;
+        cherry_rx_armed = 0u;
+        cherry_tx_head = cherry_tx_tail = cherry_tx_count = 0u;
+        cherry_tx_busy = false;
         ++cherry_epoch;
-        cherry_reset_pending = 1;
+        cherry_reset_pending = 1u;
     }
-#endif
+    if (event == USBD_EVENT_CONFIGURED) {
+        cherry_rx_head = cherry_rx_tail = cherry_rx_count = 0u;
+        cherry_tx_head = cherry_tx_tail = cherry_tx_count = 0u;
+        cherry_tx_busy = false;
+        ++cherry_epoch;
+        cherry_rx_armed = 1u;
+        usbd_ep_start_read(busid, LINK_USB_CHERRY_EP_OUT,
+                           cherry_rx_q[0], LINK_USB_CHERRY_EP_MPS);
+    }
+#else
     if (event == USBD_EVENT_CONFIGURED) {
         cherry_tx_busy = false;
         usbd_ep_start_read(busid, LINK_USB_CHERRY_EP_OUT, cherry_rx_buf, sizeof(cherry_rx_buf));
     }
+#endif
 }
 
 void usb_dc_low_level_init(void)
@@ -559,6 +570,10 @@ void usb_dc_low_level_deinit(void)
 void link_usb_init(void)
 {
     cherry_tx_busy = false;
+#if LINK_BLE_ENABLE
+    cherry_rx_head = cherry_rx_tail = cherry_rx_count = cherry_rx_armed = 0u;
+    cherry_tx_head = cherry_tx_tail = cherry_tx_count = 0u;
+#endif
     memset(&link_perf_counters, 0, sizeof(link_perf_counters));
     cmsis_dap_init();
 #if LINK_USB_PROFILE_TIMING
@@ -583,17 +598,53 @@ void link_usb_poll(void)
             cmsis_dap_init();
         }
     }
-    if (cherry_pending && !cherry_tx_busy) {
-        uint8_t count;
+    if (cherry_rx_count > 0u && cherry_tx_count < LINK_USB_TX_Q) {
+        uint8_t rx_slot;
+        uint8_t tx_slot;
+        uint8_t nbytes;
+        uint8_t processing_epoch;
+        uint8_t have_pkt = 0u;
         uint32_t usb_irq_enabled = PFIC_GetStatusIRQ(USB_IRQn);
-        /* ISR cannot rearm OUT except on reset; guard only the short snapshot. */
         PFIC_DisableIRQ(USB_IRQn);
-        count = cherry_pending;
-        cherry_work_epoch = cherry_epoch;
-        memcpy(cherry_work_buf,cherry_rx_buf,count);
-        cherry_pending = 0;
+        if (cherry_rx_count > 0u && cherry_tx_count < LINK_USB_TX_Q && !cherry_reset_pending) {
+            rx_slot = cherry_rx_tail;
+            tx_slot = cherry_tx_head;
+            nbytes = cherry_rx_len[rx_slot];
+            processing_epoch = cherry_epoch;
+            have_pkt = 1u;
+        }
         if (usb_irq_enabled) PFIC_EnableIRQ(USB_IRQn);
-        if (count) cherry_process_out(LINK_USB_CHERRY_BUSID, LINK_USB_CHERRY_EP_OUT, count);
+        if (have_pkt) {
+            uint8_t tx_len = cherry_dispatch_packet(cherry_rx_q[rx_slot], nbytes,
+                                                    cherry_tx_q[tx_slot], LINK_USB_CHERRY_EP_MPS);
+            usb_irq_enabled = PFIC_GetStatusIRQ(USB_IRQn);
+            PFIC_DisableIRQ(USB_IRQn);
+            if (cherry_epoch == processing_epoch && !cherry_reset_pending) {
+                cherry_rx_tail = (uint8_t)((cherry_rx_tail + 1u) % LINK_USB_RX_Q);
+                cherry_rx_count--;
+                if (!cherry_rx_armed && cherry_rx_count < LINK_USB_RX_Q) {
+                    cherry_rx_armed = 1u;
+                    usbd_ep_start_read(LINK_USB_CHERRY_BUSID, LINK_USB_CHERRY_EP_OUT,
+                                       cherry_rx_q[cherry_rx_head], LINK_USB_CHERRY_EP_MPS);
+                }
+                if (tx_len > 0u) {
+                    cherry_tx_len_q[tx_slot] = tx_len;
+                    cherry_tx_head = (uint8_t)((cherry_tx_head + 1u) % LINK_USB_TX_Q);
+                    cherry_tx_count++;
+                    if (!cherry_tx_busy) {
+                        cherry_tx_busy = true;
+                        if (usbd_ep_start_write(LINK_USB_CHERRY_BUSID, LINK_USB_CHERRY_EP_IN,
+                                                cherry_tx_q[cherry_tx_tail],
+                                                cherry_tx_len_q[cherry_tx_tail]) < 0) {
+                            cherry_tx_busy = false;
+                            cherry_tx_tail = (uint8_t)((cherry_tx_tail + 1u) % LINK_USB_TX_Q);
+                            cherry_tx_count--;
+                        }
+                    }
+                }
+            }
+            if (usb_irq_enabled) PFIC_EnableIRQ(USB_IRQn);
+        }
     }
 #endif
 }
@@ -603,15 +654,31 @@ uint8_t link_usb_send(const uint8_t *data, uint8_t len)
     if ((data == 0) || (len == 0) || cherry_tx_busy || !usb_device_is_configured(LINK_USB_CHERRY_BUSID)) {
         return 0;
     }
-    if (len > sizeof(cherry_tx_buf)) {
-        len = sizeof(cherry_tx_buf);
+    if (len > LINK_USB_CHERRY_EP_MPS) {
+        len = LINK_USB_CHERRY_EP_MPS;
     }
+#if LINK_BLE_ENABLE
+    if (cherry_tx_count >= LINK_USB_TX_Q) return 0;
+    memcpy(cherry_tx_q[cherry_tx_head], data, len);
+    cherry_tx_len_q[cherry_tx_head] = len;
+    cherry_tx_head = (uint8_t)((cherry_tx_head + 1u) % LINK_USB_TX_Q);
+    cherry_tx_count++;
+    cherry_tx_busy = true;
+    if (usbd_ep_start_write(LINK_USB_CHERRY_BUSID, LINK_USB_CHERRY_EP_IN,
+                            cherry_tx_q[cherry_tx_tail], cherry_tx_len_q[cherry_tx_tail]) < 0) {
+        cherry_tx_busy = false;
+        cherry_tx_tail = (uint8_t)((cherry_tx_tail + 1u) % LINK_USB_TX_Q);
+        cherry_tx_count--;
+        return 0;
+    }
+#else
     memcpy(cherry_tx_buf, data, len);
     cherry_tx_busy = true;
     if (usbd_ep_start_write(LINK_USB_CHERRY_BUSID, LINK_USB_CHERRY_EP_IN, cherry_tx_buf, len) < 0) {
         cherry_tx_busy = false;
         return 0;
     }
+#endif
     return 1;
 }
 

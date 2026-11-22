@@ -1,3 +1,4 @@
 obj/
+test_firmware/
 __pycache__/
 *.pyc

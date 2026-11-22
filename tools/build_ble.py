@@ -1,7 +1,7 @@
 """Build CH592-LINK firmware for the dual USB/BLE probe."""
 from pathlib import Path
 import subprocess, os, json, datetime, re, shutil, sys
-from build_f103_loader import build_f103_loader
+from build_target_loaders import build_target_loaders
 sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -11,10 +11,11 @@ if not compiler and not shutil.which('riscv-none-embed-gcc'):
 BIN = Path(compiler) if compiler else Path(shutil.which('riscv-none-embed-gcc')).parent
 OUT=ROOT/'obj'/'ble_build'
 OUT.mkdir(parents=True,exist_ok=True)
-loader_bytes=build_f103_loader(ROOT,OUT/'thumb')
+loader_sizes=build_target_loaders(ROOT,OUT/'thumb')
 sources=['src/Main.c','src/link_usb.c','src/link_usb_cherry.c','src/cmsis_dap.c',
          'src/target_arm_swd.c','src/link_board.c','src/link_protocol.c','src/link_target.c',
-         'src/link_ble.c','src/link_ble_programmer.c','src/link_session.c','src/link_f103_loader.c',
+         'src/link_ble.c','src/link_ble_programmer.c','src/link_session.c',
+         'src/link_target_db.c','src/link_target_loader.c',
          'third_party/cherryusb/core/usbd_core.c',
          'third_party/cherryusb/port/ch32/ch58x/usb_ch58x_dc_usbfs.c',
          'ble_sdk/HAL/MCU.c','ble_sdk/HAL/RTC.c','ble_sdk/LIB/ble_task_scheduler.S',
@@ -47,7 +48,7 @@ for source in sources:
     obj=OUT/(source.replace('/','_').replace('.c','.o').replace('.S','.o'))
     run([BIN/'riscv-none-embed-gcc.exe',*flags,'-fstack-usage','-c',ROOT/source,'-o',obj])
     objects.append(obj)
-name='CH592_LINK_V1_0.3.17-s10-ble'
+name='CH592_LINK_V1_0.4.2-ble'
 elf=OUT/(name+'.elf'); hexfile=OUT/(name+'.hex'); mapfile=OUT/(name+'.map')
 (OUT/'objects.rsp').write_text('\n'.join('"'+p.relative_to(ROOT).as_posix()+'"' for p in objects),encoding='ascii')
 run([BIN/'riscv-none-embed-gcc.exe',*flags,'-T',ROOT/'Ld/Link.ld','-nostartfiles',
@@ -64,9 +65,9 @@ ebss=int(match[1],16) if match else None
 report={'built':datetime.datetime.now().astimezone().isoformat(),
         'sections':sections,'ebss':ebss,'stack_headroom_bytes':0x20006800-ebss if ebss else None,
         'libc_heap_limit_bytes':512,'BLE_pool_bytes':6144,'physical_tests':'pending',
-        'BLE_TX_NUM_EVENT':4,'f103_thumb_bytes':loader_bytes,'ble_swd_word_io':True,
-        'f103_page_crc':True,'sram_burst_upload':True,'usb_drw_word_io':True,
-        'swd_requested_fast_hz':[2000000,5000000],'ble_max_rx_frame':139}
+        'BLE_TX_NUM_EVENT':4,'target_loader_thumb_bytes':loader_sizes,'ble_swd_word_io':True,
+        'multi_target_f1_f3_f4':True,'target_page_crc':True,'sram_burst_upload':True,
+        'usb_drw_word_io':True,'swd_requested_fast_hz':[2000000,5000000],'ble_max_rx_frame':139}
 assert report['stack_headroom_bytes']-512>=4096,'Less than 4KiB reserved for stack.'
 report['warning_count']=''.join(log).count('warning:')
 report['stack_after_heap_reservation_bytes']=report['stack_headroom_bytes']-512

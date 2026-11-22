@@ -25,10 +25,11 @@ void target_arm_swd_ble_get_attach_diag(target_arm_swd_ble_attach_diag_t *diag);
 #define LINK_SWD_PENDING ((link_target_status_t)0x80u)
 #define LINK_SWD_TIMEOUT ((link_target_status_t)0x81u)
 link_target_status_t target_arm_swd_ble_read32(uint32_t addr, uint32_t *value);
-/* 1..256 bytes of F103 Flash. Buffer is provisional until OK, and must
- * remain valid until completion or mem_cancel(). */
+void target_arm_swd_ble_set_flash_bounds(uint32_t base, uint32_t size);
+/* 1..256 bytes of active target Flash. Buffer is provisional until OK, and
+ * must remain valid until completion or mem_cancel(). */
 link_target_status_t target_arm_swd_ble_read_flash(uint32_t addr, uint8_t *data, uint16_t count);
-/* Word-aligned write into one private F103 loader SRAM region. The final
+/* Word-aligned write into the private target loader SRAM region. The final
  * word is padded with FF. Keep data stable until completion or cancel. */
 link_target_status_t target_arm_swd_ble_write_sram(uint32_t addr, const uint8_t *data, uint16_t count);
 link_target_status_t target_arm_swd_ble_write32(uint32_t addr, uint32_t value);

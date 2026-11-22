@@ -10,7 +10,7 @@ import socket
 import webbrowser
 
 ROOT = Path(__file__).resolve().parent
-WEB_BUILD = 'CH592-LINK-0.3.17'
+WEB_BUILD = 'CH592-LINK-0.4.2'
 
 
 class LoopbackServer(ThreadingHTTPServer):
@@ -37,7 +37,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         if path == '/health.json':
-            data = json.dumps({'tool': 'CH592-LINK-BLE', 'web_build': WEB_BUILD, 'protocol': 1}).encode('utf-8')
+            data = json.dumps({'tool': 'CH592-LINK-BLE', 'web_build': WEB_BUILD, 'protocol': 2}).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(data)))

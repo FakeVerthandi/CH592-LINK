@@ -138,20 +138,27 @@ static inline __attribute__((always_inline)) void swd_word_clock(uint16_t half_u
     R32_PA_CLR = LINK_SWD_CLK_PIN;
 }
 
-LINK_SWD_RAM_CODE void link_board_swd_write_word(uint32_t value, uint16_t half_us)
+LINK_SWD_RAM_CODE void link_board_swd_write_bits_fast(uint32_t value, uint8_t bit_count, uint16_t half_us)
 {
-    unsigned remaining = 32;
-
-    /* The first bit drives the latch before switching SWDIO to output. */
+    if (!bit_count) return;
     if (value & 1u) link_board_swd_dio_drive_high();
     else link_board_swd_dio_drive_low();
     for (;;) {
         swd_word_clock(half_us);
-        if (--remaining == 0) break;
+        if (--bit_count == 0u) break;
         value >>= 1;
         if (value & 1u) R32_PA_OUT |= LINK_SWD_DIO_PIN;
         else R32_PA_CLR = LINK_SWD_DIO_PIN;
     }
+}
+
+LINK_SWD_RAM_CODE void link_board_swd_idle_low_fast(uint8_t cycles, uint16_t half_us)
+{
+    if (!cycles) return;
+    link_board_swd_dio_drive_low();
+    do {
+        swd_word_clock(half_us);
+    } while (--cycles);
 }
 
 LINK_SWD_RAM_CODE uint32_t link_board_swd_read_word_early(uint16_t half_us)

@@ -13,11 +13,11 @@ static inline __attribute__((always_inline)) void link_swd_half_delay(uint16_t t
 #error Fast SWD profiles require the 60 MHz CH592 build
 #endif
     if (timing == LINK_SWD_PAD_5MHZ) {
-        __asm__ volatile (".rept 6\n nop\n .endr" ::: "memory");
+        __asm__ volatile ("nop\n nop" ::: "memory");
         return;
     }
     if (timing == LINK_SWD_PAD_2MHZ) {
-        __asm__ volatile (".rept 15\n nop\n .endr" ::: "memory");
+        __asm__ volatile (".rept 8\n nop\n .endr" ::: "memory");
         return;
     }
 #endif

@@ -193,7 +193,7 @@ static uint8_t dap_info_string(uint8_t id, uint8_t *response, uint16_t response_
 #else
 #if LINK_BLE_ENABLE
 #if LINK_BLE_SRAM_WRITE
-        text = LINK_BLE_TWO_WRITES ? "0.3.17-ble" : LINK_S9_FAST_CLOCK ? "0.3.16-ble" : LINK_USB_DRW_WORD_IO ? "0.3.15-ble" : "0.3.14-ble";
+        text = "0.4.2-ble";
 #else
         text = "0.3.10-ble";
 #endif
@@ -242,7 +242,11 @@ static uint8_t dap_cmd_info(const uint8_t *request, uint16_t request_len,
         return 3;
     case DAP_INFO_PACKET_COUNT:
         response[1] = 1;
+#if LINK_USB_USE_CHERRYUSB && LINK_BLE_ENABLE
+        response[2] = 3;
+#else
         response[2] = 1;
+#endif
         return 3;
     case DAP_INFO_PACKET_SIZE:
         response[1] = 2;

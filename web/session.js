@@ -22,7 +22,7 @@
     return new SessionError('GATT',message,error);
   }
   function versionAtLeast(version,minimum){const parts=String(version||'').split('.').map(Number);if(parts.length!==3||parts.some(n=>!Number.isInteger(n)))return false;for(let i=0;i<3;i++){if(parts[i]!==minimum[i])return parts[i]>minimum[i];}return true;}
-  function protocolFeatures(info){return {diagnostic:info?.protocol===1&&versionAtLeast(info.version,[0,3,1]),linkStatus:info?.protocol===1&&versionAtLeast(info.version,[0,3,4]),deviceDisconnect:info?.protocol===1&&versionAtLeast(info.version,[0,3,6])};}
+  function protocolFeatures(info){const v2=info?.protocol===2;return {diagnostic:v2||(info?.protocol===1&&versionAtLeast(info.version,[0,3,1])),linkStatus:v2||(info?.protocol===1&&versionAtLeast(info.version,[0,3,4])),deviceDisconnect:v2||(info?.protocol===1&&versionAtLeast(info.version,[0,3,6]))};}
   class Controller {
     constructor({uuids,locks=null,onState=()=>{},onClosed=()=>{},onNotification=()=>{},onDeviceDisconnect=()=>{},log=()=>{},timers={setTimeout:(...args)=>setTimeout(...args),clearTimeout:id=>clearTimeout(id)},timeouts={}}={}){
       this.uuids=uuids;this.locks=locks;this.onState=onState;this.onClosed=onClosed;this.onNotification=onNotification;this.onDeviceDisconnect=onDeviceDisconnect;this.log=log;this.timers=timers;

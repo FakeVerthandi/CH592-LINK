@@ -25,8 +25,13 @@ void link_board_swd_dio_force_high(void);
 void link_board_swd_dio_release(void);
 #if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
 /* Call with SWCLK low, after the protocol selects the data phase. */
-void link_board_swd_write_word(uint32_t value, uint16_t half_us);
-/* SWDIO is already released. Sample at the BLE early sample position. */
+void link_board_swd_write_bits_fast(uint32_t value, uint8_t bit_count, uint16_t half_us);
+void link_board_swd_idle_low_fast(uint8_t cycles, uint16_t half_us);
+static inline void link_board_swd_write_word(uint32_t value, uint16_t half_us)
+{
+    link_board_swd_write_bits_fast(value, 32u, half_us);
+}
+/* SWDIO is already released. Sample at the early sample position. */
 uint32_t link_board_swd_read_word_early(uint16_t half_us);
 #endif
 void link_board_target_nrst_set(uint8_t high_level);
