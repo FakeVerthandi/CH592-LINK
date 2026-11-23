@@ -33,6 +33,9 @@ static inline void link_board_swd_write_word(uint32_t value, uint16_t half_us)
 }
 /* SWDIO is already released. Sample at the early sample position. */
 uint32_t link_board_swd_read_word_early(uint16_t half_us);
+/* Fast RAM-only 5MHz SWD AP/DP single-word burst primitives (returns ACK or 0xFE on parity error). */
+uint8_t link_board_swd_fast_ap_write(uint8_t req, uint32_t value, uint8_t trn, uint8_t wtrn);
+uint8_t link_board_swd_fast_ap_read(uint8_t req, uint32_t *out, uint8_t trn);
 #endif
 void link_board_target_nrst_set(uint8_t high_level);
 

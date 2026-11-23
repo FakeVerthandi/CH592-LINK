@@ -155,6 +155,7 @@ static uint8_t arm_swd_dap_write_phase;
 static uint8_t arm_swd_dap_power_ready;
 static uint8_t arm_swd_dap_select_valid;
 static uint8_t arm_swd_dap_csw_valid;
+static uint8_t arm_swd_dap_tar_valid;
 static uint8_t arm_swd_dp_ready;
 static uint8_t arm_swd_pins;
 static uint8_t arm_swd_last_dp_port;
@@ -200,6 +201,7 @@ static void arm_swd_dap_invalidate_context(void)
     arm_swd_dap_power_ready = 0;
     arm_swd_dap_select_valid = 0;
     arm_swd_dap_csw_valid = 0;
+    arm_swd_dap_tar_valid = 0;
 }
 
 static uint8_t arm_swd_make_request(uint8_t ap_ndp, uint8_t rnw, uint8_t addr);
@@ -539,7 +541,7 @@ LINK_SWD_RAM_CODE static void arm_swd_write_payload32(uint32_t value, uint8_t ap
 #define arm_swd_write_payload32(value, ap_drw) arm_swd_write_bits((value), 32)
 #endif
 
-LINK_SWD_RAM_CODE static link_target_status_t arm_swd_read_dp_once(uint8_t addr, uint32_t *value, uint8_t *raw_ack)
+static link_target_status_t arm_swd_read_dp_once(uint8_t addr, uint32_t *value, uint8_t *raw_ack)
 {
     uint32_t irq_status = 0;
     uint8_t ack;
@@ -606,7 +608,7 @@ LINK_SWD_RAM_CODE static link_target_status_t arm_swd_read_dp_once(uint8_t addr,
     return status;
 }
 
-LINK_SWD_RAM_CODE static link_target_status_t arm_swd_write_dp_once(uint8_t addr, uint32_t value, uint8_t *raw_ack)
+static link_target_status_t arm_swd_write_dp_once(uint8_t addr, uint32_t value, uint8_t *raw_ack)
 {
     uint32_t irq_status = 0;
     uint8_t ack;
@@ -689,6 +691,9 @@ static link_target_status_t arm_swd_dap_write_dp_with_retry(uint8_t addr, uint32
 
         if (!arm_swd_dap_write_phase_valid) {
             return LINK_TARGET_IO_ERROR;
+        }
+        if ((addr == ARM_SWD_DP_SELECT) && arm_swd_dap_select_valid && (arm_swd_dp_select == value)) {
+            return LINK_TARGET_OK;
         }
         arm_swd_write_data_turnaround_cycles = arm_swd_dap_write_phase;
         status = arm_swd_write_dp_once(addr, value, 0);
@@ -1124,6 +1129,7 @@ static link_target_status_t arm_swd_write_ap_reg(uint8_t addr, uint32_t value)
         ((arm_swd_dp_select & ARM_SWD_DP_SELECT_APBANKSEL_MASK) == ARM_SWD_MEM_AP_BANK0) &&
         (addr == ARM_SWD_AP_TAR)) {
         arm_swd_mem_ap_tar = value;
+        arm_swd_dap_tar_valid = arm_swd_dap_write_phase_valid;
     }
     if ((status == LINK_TARGET_OK) &&
         ((arm_swd_dp_select & ARM_SWD_DP_SELECT_APBANKSEL_MASK) == ARM_SWD_MEM_AP_BANK0) &&
@@ -1343,6 +1349,7 @@ static link_target_status_t arm_swd_dap_write_ap_with_retry(uint8_t addr, uint32
         }
         if (bank0 && (addr == ARM_SWD_AP_TAR)) {
             arm_swd_mem_ap_tar = write_value;
+            arm_swd_dap_tar_valid = 1;
         } else if (bank0 && (addr == ARM_SWD_AP_CSW)) {
             arm_swd_mem_ap_csw = write_value;
             arm_swd_dap_csw_valid = 1;
@@ -1645,6 +1652,7 @@ link_target_status_t target_arm_swd_dap_calibrate_write_phase(void)
         arm_swd_dap_power_ready = 1;
         arm_swd_dap_select_valid = 1;
         arm_swd_dap_csw_valid = 1;
+        arm_swd_dap_tar_valid = 1;
         arm_swd_dp_select = 0;
         arm_swd_mem_ap_csw = actual_csw;
         arm_swd_mem_ap_tar = actual_tar;
@@ -1652,6 +1660,11 @@ link_target_status_t target_arm_swd_dap_calibrate_write_phase(void)
         return LINK_TARGET_OK;
     }
     arm_swd_dap_invalidate_context();
+    /* Keep the default CH592 write phase usable when the host configures SWD
+     * before waking the target (e.g. OpenOCD connect_assert_srst). */
+    arm_swd_dap_write_phase = 2;
+    arm_swd_write_data_turnaround_cycles = 2;
+    arm_swd_dap_write_phase_valid = 1;
     return status;
 }
 
@@ -1969,7 +1982,8 @@ link_target_status_t target_arm_swd_dap_write_block(uint8_t request,
             !arm_swd_dap_write_phase_valid || !arm_swd_dap_power_ready ||
             !arm_swd_dap_select_valid || !arm_swd_dap_csw_valid ||
             (arm_swd_dp_select != 0u) ||
-            (arm_swd_mem_ap_csw != ARM_SWD_MEM_AP_CSW_32) ||
+            ((arm_swd_mem_ap_csw & (ARM_SWD_AP_CSW_ADDRINC_MASK | ARM_SWD_AP_CSW_SIZE_MASK)) !=
+             (ARM_SWD_AP_CSW_ADDRINC_SINGLE | ARM_SWD_AP_CSW_SIZE_32)) ||
             ((addr & 3u) != 0u) || (addr < sram_base) || (addr >= sram_end) ||
             ((uint32_t)word_count * 4u > sram_end - addr)) {
             return LINK_TARGET_NOT_IMPLEMENTED;
@@ -1979,53 +1993,106 @@ link_target_status_t target_arm_swd_dap_write_block(uint8_t request,
             uint32_t segment_words = (1024u - (addr & 1023u)) / 4u;
             uint32_t remaining = (uint32_t)word_count - *done;
             uint32_t i;
-            uint32_t ctrl_stat = 0;
+            uint32_t rdbuff_val = 0;
+#if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+            uint8_t fast_burst = (arm_swd_half_cycle_delay_us == LINK_SWD_PAD_5MHZ) &&
+                                 (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY);
+#endif
 
             if (segment_words > remaining) {
                 segment_words = remaining;
             }
-            stage = ARM_SWD_MEM_STAGE_TAR;
-            detail = addr;
-            status = arm_swd_block_write_ap_wait(ARM_SWD_AP_TAR, addr, wait_retry);
-            if (status != LINK_TARGET_OK) {
-                goto failed;
-            }
-
-            for (i = 0; i < segment_words; i++) {
-                uint32_t offset = (uint32_t)*done * 4u;
-
-                last_value = ((uint32_t)data[offset]) |
-                             ((uint32_t)data[offset + 1u] << 8) |
-                             ((uint32_t)data[offset + 2u] << 16) |
-                             ((uint32_t)data[offset + 3u] << 24);
-                stage = ARM_SWD_MEM_STAGE_DRW;
+            if (!arm_swd_dap_tar_valid || ((addr & 1023u) == 0u)) {
+                stage = ARM_SWD_MEM_STAGE_TAR;
                 detail = addr;
-                status = arm_swd_block_write_ap_wait(ARM_SWD_AP_DRW, last_value, wait_retry);
+                status = arm_swd_block_write_ap_wait(ARM_SWD_AP_TAR, addr, wait_retry);
                 if (status != LINK_TARGET_OK) {
                     goto failed;
                 }
-                (*done)++;
-                addr += 4u;
-                arm_swd_mem_ap_tar = addr;
+                arm_swd_dap_tar_valid = 1;
             }
 
-            /* Complete this segment before changing TAR at a 1KiB wrap.
-             * ACK counts are preserved even if final completion fails. */
-            stage = ARM_SWD_MEM_STAGE_RDBUFF;
-            detail = addr;
-            status = arm_swd_block_read_dp_wait(ARM_SWD_DP_RDBUFF, &ctrl_stat, wait_retry);
-            if (status != LINK_TARGET_OK) {
-                goto failed;
-            }
-            stage = ARM_SWD_MEM_STAGE_DRW;
-            status = arm_swd_block_read_dp_wait(ARM_SWD_DP_CTRL_STAT, &ctrl_stat, wait_retry);
-            if (status != LINK_TARGET_OK) {
-                goto failed;
-            }
-            if ((ctrl_stat & ARM_SWD_DP_CTRL_STICKY_MASK) != 0u) {
-                detail = ctrl_stat;
-                status = LINK_TARGET_FAULT;
-                goto failed;
+#if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+            if (fast_burst) {
+                uint8_t trn = arm_swd_turnaround_cycles;
+                uint8_t wtrn = arm_swd_dap_write_phase;
+                for (i = 0; i < segment_words; i++) {
+                    uint32_t offset = (uint32_t)*done * 4u;
+                    uint32_t retry;
+                    uint8_t ack = 0;
+
+                    last_value = ((uint32_t)data[offset]) |
+                                 ((uint32_t)data[offset + 1u] << 8) |
+                                 ((uint32_t)data[offset + 2u] << 16) |
+                                 ((uint32_t)data[offset + 3u] << 24);
+                    for (retry = 0; retry <= wait_retry; retry++) {
+                        ack = link_board_swd_fast_ap_write(0xBBu, last_value, trn, wtrn);
+                        if (ack != ARM_SWD_ACK_WAIT) break;
+                        LINK_PERF_INC(ack_wait);
+                    }
+                    if (ack != ARM_SWD_ACK_OK) {
+                        stage = ARM_SWD_MEM_STAGE_DRW;
+                        detail = addr;
+                        status = (ack == ARM_SWD_ACK_WAIT) ? LINK_TARGET_WAIT :
+                                 (ack == ARM_SWD_ACK_FAULT) ? LINK_TARGET_FAULT : LINK_TARGET_IO_ERROR;
+                        link_perf_note_swd(1, 0, ack, status == LINK_TARGET_IO_ERROR);
+                        arm_swd_set_transfer_diag(1, 0, ARM_SWD_AP_DRW, ack, status, last_value);
+                        goto failed;
+                    }
+                    (*done)++;
+                    addr += 4u;
+                    arm_swd_mem_ap_tar = addr;
+                }
+                link_perf_counters.ap_write_attempts += segment_words;
+                /* Drain posted write via RDBUFF; catches FAULT immediately and clocks idle. */
+                {
+                    uint32_t retry;
+                    uint8_t ack = 0;
+                    for (retry = 0; retry <= wait_retry; retry++) {
+                        ack = link_board_swd_fast_ap_read(0xBDu, &rdbuff_val, trn);
+                        if (ack != ARM_SWD_ACK_WAIT) break;
+                        LINK_PERF_INC(ack_wait);
+                    }
+                    arm_swd_idle_low_cycles(8);
+                    arm_swd_dio_release();
+                    if (ack != ARM_SWD_ACK_OK) {
+                        stage = ARM_SWD_MEM_STAGE_RDBUFF;
+                        detail = addr;
+                        status = (ack == 0xFEu) ? LINK_TARGET_PARITY :
+                                 (ack == ARM_SWD_ACK_WAIT) ? LINK_TARGET_WAIT :
+                                 (ack == ARM_SWD_ACK_FAULT) ? LINK_TARGET_FAULT : LINK_TARGET_IO_ERROR;
+                        link_perf_note_swd(0, 1, ack, (status == LINK_TARGET_IO_ERROR) || (status == LINK_TARGET_PARITY));
+                        arm_swd_set_transfer_diag(0, 1, ARM_SWD_DP_RDBUFF, ack, status, 0);
+                        goto failed;
+                    }
+                    link_perf_counters.dp_read_attempts++;
+                }
+            } else
+#endif
+            {
+                for (i = 0; i < segment_words; i++) {
+                    uint32_t offset = (uint32_t)*done * 4u;
+
+                    last_value = ((uint32_t)data[offset]) |
+                                 ((uint32_t)data[offset + 1u] << 8) |
+                                 ((uint32_t)data[offset + 2u] << 16) |
+                                 ((uint32_t)data[offset + 3u] << 24);
+                    stage = ARM_SWD_MEM_STAGE_DRW;
+                    detail = addr;
+                    status = arm_swd_block_write_ap_wait(ARM_SWD_AP_DRW, last_value, wait_retry);
+                    if (status != LINK_TARGET_OK) {
+                        goto failed;
+                    }
+                    (*done)++;
+                    addr += 4u;
+                    arm_swd_mem_ap_tar = addr;
+                }
+                stage = ARM_SWD_MEM_STAGE_RDBUFF;
+                detail = addr;
+                status = arm_swd_block_read_dp_wait(ARM_SWD_DP_RDBUFF, &rdbuff_val, wait_retry);
+                if (status != LINK_TARGET_OK) {
+                    goto failed;
+                }
             }
         }
         arm_swd_set_mem_diag(ARM_SWD_MEM_STAGE_NONE, last_value);
@@ -2080,7 +2147,8 @@ link_target_status_t target_arm_swd_dap_read_block(uint8_t request,
         !arm_swd_dap_write_phase_valid || !arm_swd_dap_power_ready ||
         !arm_swd_dap_select_valid || !arm_swd_dap_csw_valid ||
         arm_swd_synthetic_rdbuff_valid || (arm_swd_dp_select != 0u) ||
-        (arm_swd_mem_ap_csw != ARM_SWD_MEM_AP_CSW_32) ||
+        ((arm_swd_mem_ap_csw & (ARM_SWD_AP_CSW_ADDRINC_MASK | ARM_SWD_AP_CSW_SIZE_MASK)) !=
+         (ARM_SWD_AP_CSW_ADDRINC_SINGLE | ARM_SWD_AP_CSW_SIZE_32)) ||
         ((addr & 3u) != 0u) || (region_end == 0u) ||
         ((uint32_t)word_count * 4u > region_end - addr)) {
         return LINK_TARGET_NOT_IMPLEMENTED;
@@ -2091,43 +2159,110 @@ link_target_status_t target_arm_swd_dap_read_block(uint8_t request,
         uint32_t remaining = (uint32_t)word_count - *done;
         uint32_t i;
         uint32_t value = 0;
+#if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+        uint8_t fast_burst = (arm_swd_half_cycle_delay_us == LINK_SWD_PAD_5MHZ) &&
+                             (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY);
+#endif
 
         if (segment_words > remaining) {
             segment_words = remaining;
         }
-        stage = ARM_SWD_MEM_STAGE_TAR;
-        detail = addr;
-        status = arm_swd_block_write_ap_wait(ARM_SWD_AP_TAR, addr, wait_retry);
-        if (status != LINK_TARGET_OK) {
-            goto failed;
-        }
-        for (i = 0; i < segment_words; i++) {
-            stage = ARM_SWD_MEM_STAGE_DRW;
+        if (!arm_swd_dap_tar_valid || ((addr & 1023u) == 0u)) {
+            stage = ARM_SWD_MEM_STAGE_TAR;
             detail = addr;
-            arm_swd_last_ap_read_tar = addr;
-            status = arm_swd_block_read_ap_wait(&value, wait_retry);
+            status = arm_swd_block_write_ap_wait(ARM_SWD_AP_TAR, addr, wait_retry);
             if (status != LINK_TARGET_OK) {
                 goto failed;
             }
-            addr += 4u;
-            arm_swd_mem_ap_tar = addr;
-            if (i != 0u) {
-                uint32_t offset = (uint32_t)*done * 4u;
-
-                /* Each AP read returns the preceding word. The first response
-                 * belongs to the old pipeline and must be discarded. */
-                data[offset] = (uint8_t)value;
-                data[offset + 1u] = (uint8_t)(value >> 8);
-                data[offset + 2u] = (uint8_t)(value >> 16);
-                data[offset + 3u] = (uint8_t)(value >> 24);
-                (*done)++;
-            }
+            arm_swd_dap_tar_valid = 1;
         }
-        stage = ARM_SWD_MEM_STAGE_RDBUFF;
-        detail = arm_swd_last_ap_read_tar;
-        status = arm_swd_block_read_dp_wait(ARM_SWD_DP_RDBUFF, &value, wait_retry);
-        if (status != LINK_TARGET_OK) {
-            goto failed;
+#if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+        if (fast_burst) {
+            uint8_t trn = arm_swd_turnaround_cycles;
+            for (i = 0; i < segment_words; i++) {
+                uint32_t retry;
+                uint8_t ack = 0;
+                arm_swd_last_ap_read_tar = addr;
+                for (retry = 0; retry <= wait_retry; retry++) {
+                    ack = link_board_swd_fast_ap_read(0x9Fu, &value, trn);
+                    if (ack != ARM_SWD_ACK_WAIT) break;
+                    LINK_PERF_INC(ack_wait);
+                }
+                if (ack != ARM_SWD_ACK_OK) {
+                    stage = ARM_SWD_MEM_STAGE_DRW;
+                    detail = addr;
+                    status = (ack == 0xFEu) ? LINK_TARGET_PARITY :
+                             (ack == ARM_SWD_ACK_WAIT) ? LINK_TARGET_WAIT :
+                             (ack == ARM_SWD_ACK_FAULT) ? LINK_TARGET_FAULT : LINK_TARGET_IO_ERROR;
+                    link_perf_note_swd(1, 1, ack, (status == LINK_TARGET_IO_ERROR) || (status == LINK_TARGET_PARITY));
+                    arm_swd_set_transfer_diag(1, 1, ARM_SWD_AP_DRW, ack, status, 0);
+                    goto failed;
+                }
+                addr += 4u;
+                arm_swd_mem_ap_tar = addr;
+                if (i != 0u) {
+                    uint32_t offset = (uint32_t)*done * 4u;
+                    data[offset] = (uint8_t)value;
+                    data[offset + 1u] = (uint8_t)(value >> 8);
+                    data[offset + 2u] = (uint8_t)(value >> 16);
+                    data[offset + 3u] = (uint8_t)(value >> 24);
+                    (*done)++;
+                }
+            }
+            link_perf_counters.ap_read_attempts += segment_words;
+            {
+                uint32_t retry;
+                uint8_t ack = 0;
+                for (retry = 0; retry <= wait_retry; retry++) {
+                    ack = link_board_swd_fast_ap_read(0xBDu, &value, trn);
+                    if (ack != ARM_SWD_ACK_WAIT) break;
+                    LINK_PERF_INC(ack_wait);
+                }
+                arm_swd_idle_low_cycles(8);
+                arm_swd_dio_release();
+                if (ack != ARM_SWD_ACK_OK) {
+                    stage = ARM_SWD_MEM_STAGE_RDBUFF;
+                    detail = arm_swd_last_ap_read_tar;
+                    status = (ack == 0xFEu) ? LINK_TARGET_PARITY :
+                             (ack == ARM_SWD_ACK_WAIT) ? LINK_TARGET_WAIT :
+                             (ack == ARM_SWD_ACK_FAULT) ? LINK_TARGET_FAULT : LINK_TARGET_IO_ERROR;
+                    link_perf_note_swd(0, 1, ack, (status == LINK_TARGET_IO_ERROR) || (status == LINK_TARGET_PARITY));
+                    arm_swd_set_transfer_diag(0, 1, ARM_SWD_DP_RDBUFF, ack, status, 0);
+                    goto failed;
+                }
+                link_perf_counters.dp_read_attempts++;
+            }
+        } else
+#endif
+        {
+            for (i = 0; i < segment_words; i++) {
+                stage = ARM_SWD_MEM_STAGE_DRW;
+                detail = addr;
+                arm_swd_last_ap_read_tar = addr;
+                status = arm_swd_block_read_ap_wait(&value, wait_retry);
+                if (status != LINK_TARGET_OK) {
+                    goto failed;
+                }
+                addr += 4u;
+                arm_swd_mem_ap_tar = addr;
+                if (i != 0u) {
+                    uint32_t offset = (uint32_t)*done * 4u;
+
+                    /* Each AP read returns the preceding word. The first response
+                     * belongs to the old pipeline and must be discarded. */
+                    data[offset] = (uint8_t)value;
+                    data[offset + 1u] = (uint8_t)(value >> 8);
+                    data[offset + 2u] = (uint8_t)(value >> 16);
+                    data[offset + 3u] = (uint8_t)(value >> 24);
+                    (*done)++;
+                }
+            }
+            stage = ARM_SWD_MEM_STAGE_RDBUFF;
+            detail = arm_swd_last_ap_read_tar;
+            status = arm_swd_block_read_dp_wait(ARM_SWD_DP_RDBUFF, &value, wait_retry);
+            if (status != LINK_TARGET_OK) {
+                goto failed;
+            }
         }
         {
             uint32_t offset = (uint32_t)*done * 4u;
@@ -2137,16 +2272,6 @@ link_target_status_t target_arm_swd_dap_read_block(uint8_t request,
             data[offset + 2u] = (uint8_t)(value >> 16);
             data[offset + 3u] = (uint8_t)(value >> 24);
             (*done)++;
-        }
-        /* Complete the posted read before changing TAR at a 1KiB boundary. */
-        status = arm_swd_block_read_dp_wait(ARM_SWD_DP_CTRL_STAT, &value, wait_retry);
-        if (status != LINK_TARGET_OK) {
-            goto failed;
-        }
-        if ((value & ARM_SWD_DP_CTRL_STICKY_MASK) != 0u) {
-            detail = value;
-            status = LINK_TARGET_FAULT;
-            goto failed;
         }
     }
     arm_swd_set_mem_diag(ARM_SWD_MEM_STAGE_NONE, arm_swd_last_ap_read_tar);

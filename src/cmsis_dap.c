@@ -193,7 +193,7 @@ static uint8_t dap_info_string(uint8_t id, uint8_t *response, uint16_t response_
 #else
 #if LINK_BLE_ENABLE
 #if LINK_BLE_SRAM_WRITE
-        text = "0.4.2-ble";
+        text = "0.4.4-ble";
 #else
         text = "0.3.10-ble";
 #endif
@@ -243,7 +243,7 @@ static uint8_t dap_cmd_info(const uint8_t *request, uint16_t request_len,
     case DAP_INFO_PACKET_COUNT:
         response[1] = 1;
 #if LINK_USB_USE_CHERRYUSB && LINK_BLE_ENABLE
-        response[2] = 3;
+        response[2] = 4;
 #else
         response[2] = 1;
 #endif
@@ -684,6 +684,14 @@ uint8_t cmsis_dap_process_packet(const uint8_t *request, uint16_t request_len,
         response[1] = DAP_OK;
         return 2;
     case ID_DAP_CONNECT:
+        if ((request_len >= 2u) && (request[1] != 0u) && (request[1] != DAP_PORT_SWD)) {
+            dap_connected = DAP_PORT_DISABLED;
+            response[1] = DAP_PORT_DISABLED;
+#if LINK_BLE_ENABLE
+            link_session_release(LINK_OWNER_USB);
+#endif
+            return 2;
+        }
 #if !LINK_BLE_ENABLE
         (void)target_arm_swd_connect();
 #endif
@@ -698,25 +706,27 @@ uint8_t cmsis_dap_process_packet(const uint8_t *request, uint16_t request_len,
                 /* Callbacks only queue data. BLE programmer runs in outer loop. */
                 TMOS_SystemProcess();
                 if (status != LINK_TARGET_WAIT) break;
-            } while ((uint32_t)(link_ble_now_ms() - start) < 1000u);
+            } while ((uint32_t)(link_ble_now_ms() - start) < 250u);
             target_arm_swd_ble_attach_cancel();
+            /* Keep SWD port open even if the target is held in reset (e.g.
+             * OpenOCD connect_assert_srst); default write phase is already armed. */
+            (void)status;
+            dap_connected = DAP_PORT_SWD;
+            response[1] = DAP_PORT_SWD;
 #else
             link_target_status_t status = target_arm_swd_read_idcode(&idcode);
 
             if (status == LINK_TARGET_OK) {
                 status = target_arm_swd_dap_calibrate_write_phase();
             }
-#endif
             if (status == LINK_TARGET_OK) {
                 dap_connected = DAP_PORT_SWD;
                 response[1] = DAP_PORT_SWD;
             } else {
                 dap_connected = DAP_PORT_DISABLED;
                 response[1] = DAP_PORT_DISABLED;
-#if LINK_BLE_ENABLE
-                link_session_release(LINK_OWNER_USB);
-#endif
             }
+#endif
         }
         return 2;
     case ID_DAP_DISCONNECT:
@@ -755,8 +765,27 @@ uint8_t cmsis_dap_process_packet(const uint8_t *request, uint16_t request_len,
         response[2] = 0;
         return 3;
     case ID_DAP_SWJ_PINS:
-        if (request_len >= 8u) {
-            response[1] = target_arm_swd_swj_pins(request[1], request[2]);
+        if (request_len >= 7u) {
+            uint8_t pin_out = request[1];
+            uint8_t pin_sel = request[2];
+            uint32_t wait_us = dap_get_u32(&request[3]);
+            uint8_t pins = target_arm_swd_swj_pins(pin_out, pin_sel);
+
+            if (wait_us > 3000000u) {
+                wait_us = 3000000u;
+            }
+            if ((wait_us > 0u) && (pin_sel != 0u)) {
+                while (((pins ^ pin_out) & pin_sel) != 0u && wait_us > 0u) {
+                    uint16_t step = (wait_us > 1000u) ? 1000u : (uint16_t)wait_us;
+                    dap_delay_us(step);
+                    wait_us -= step;
+#if LINK_BLE_ENABLE
+                    TMOS_SystemProcess();
+#endif
+                    pins = target_arm_swd_swj_pins(0, 0);
+                }
+            }
+            response[1] = pins;
         } else {
             response[1] = target_arm_swd_swj_pins(0, 0);
         }
@@ -783,7 +812,10 @@ uint8_t cmsis_dap_process_packet(const uint8_t *request, uint16_t request_len,
         if (request_len >= 2u) {
             target_arm_swd_configure(request[1]);
             /* Command boundaries have no outstanding DAP posted read. */
-            response[1] = (!dap_connected || (target_arm_swd_dap_calibrate_write_phase() == LINK_TARGET_OK)) ? DAP_OK : DAP_ERROR;
+            if (dap_connected) {
+                (void)target_arm_swd_dap_calibrate_write_phase();
+            }
+            response[1] = DAP_OK;
         }
         return 2;
     case ID_DAP_SWD_SEQUENCE:

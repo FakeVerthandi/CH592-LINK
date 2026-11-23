@@ -239,7 +239,7 @@ uint8_t link_ble_programmer_start(const uint8_t *body, uint16_t len)
         p.status = RES_PARAM; finish(); return 1;
     }
     if (cmd == CMD_INFO) {
-        const uint8_t version[] = {0, 4, 2, 2};
+        const uint8_t version[] = {0, 4, 4, 2};
         uint16_t max_frame = LINK_BLE_TWO_WRITES ? LINK_BLE_WIDE_FRAME : 20u;
         memcpy(p.buffer.response + 6, version, 4);
         put16(p.buffer.response + 10, 256u);

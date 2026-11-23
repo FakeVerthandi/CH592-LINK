@@ -10,7 +10,7 @@ import socket
 import webbrowser
 
 ROOT = Path(__file__).resolve().parent
-WEB_BUILD = 'CH592-LINK-0.4.2'
+WEB_BUILD = 'CH592-LINK-0.4.4'
 
 
 class LoopbackServer(ThreadingHTTPServer):
