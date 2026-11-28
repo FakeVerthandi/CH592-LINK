@@ -36,4 +36,22 @@
 #define LINK_SWD_SYNTHETIC_M3_IDS 0
 #endif
 
+/* 1 = CH592 hardware SPI0 + GPIO hybrid SWD (PA13=SCK, PA15=DIO 2-wire or PA14+PA15 3-wire);
+ * 0 = original pure software GPIO SWD on PA4(DIO)/PA5(SCK). */
+#ifndef CONFIG_SWD_HW_SPI
+#define CONFIG_SWD_HW_SPI 1
+#endif
+
+/* 1 = 2-wire half-duplex on PA13(SCK) + PA15(MISO/SDX), no resistor or PA14 needed;
+ * 0 = 3-wire PA13(SCK) + PA14(MOSI) + PA15(MISO) tied to SWDIO (330-470 ohm on PA14). */
+#ifndef CONFIG_SWD_HW_SPI_2WIRE
+#define CONFIG_SWD_HW_SPI_2WIRE 1
+#endif
+
+/* Mode 0 rising-edge SPI0 RX captures ACK[2] on clock 12 and DATA[0..30] on clocks 13..43,
+ * leaving DATA[31] stable on SWDIO right after clock 43 falling edge. */
+#ifndef CONFIG_SWD_SPI_RX_SHIFT1
+#define CONFIG_SWD_SPI_RX_SHIFT1 1
+#endif
+
 #endif

@@ -14,7 +14,7 @@
       <div class="brandline">
         <span class="brand-mark" aria-hidden="true"><span class="seal-char">链</span></span>
         <div class="brand-copy">
-          <p class="eyebrow">CH592 LINK / WEB 0.4.4</p>
+          <p class="eyebrow">CH592 LINK / WEB 0.5.0</p>
           <h1>无线烧录与 Flash 校验</h1>
           <p class="subtitle">STM32 F1 / F3 / F4 · 电脑端 <span class="nowrap">Chrome / Edge</span></p>
         </div>
@@ -41,7 +41,7 @@
         </span>
       </div>
       <h2>CH592-LINK</h2>
-      <p class="card-intro">PA5 → SWCLK，PA4 → SWDIO，GND 共地。STM32 目标需供电；CH592 LINK 可独立供电，通过蓝牙连接电脑。</p>
+      <p class="card-intro">PA13 → SWCLK，PA15 → SWDIO，GND 共地（建议 5cm 左右短线；若编译切回软 GPIO 则为 PA5/PA4）。STM32 目标需供电，CH592 可独立供电或由目标板取电后通过蓝牙连接电脑。</p>
 
       <div class="readout">
         <div class="readout-head">
@@ -127,8 +127,8 @@
       <label>目标 SWCLK 请求
         <select id="swd-clock">
           <option value="0">250 kHz（基线）</option>
-          <option value="2">2 MHz（实验）</option>
-          <option value="5">5 MHz（实验）</option>
+          <option value="2">2 MHz（无线推荐）</option>
+          <option value="5">5 MHz（高速）</option>
         </select>
       </label>
 
@@ -162,7 +162,7 @@
     <div class="progress-wrap">
       <progress id="progress" value="0" max="1" aria-label="烧录与校验进度"></progress>
     </div>
-    <div id="status" class="detail" role="status" aria-live="polite">连接目标并选择文件后即可开始。首次候选版优先验证完整性。</div>
+    <div id="status" class="detail" role="status" aria-live="polite">连接目标并选择文件后即可开始。</div>
     <div class="actions execution-actions">
       <button id="flash" class="primary" disabled>擦除、写入并校验</button>
       <button id="stop" disabled>停止后续擦写</button>

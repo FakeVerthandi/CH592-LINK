@@ -328,6 +328,23 @@ LINK_SWD_RAM_CODE static uint8_t arm_swd_read_bit(void)
 
 LINK_SWD_RAM_CODE static void arm_swd_write_bits(uint32_t value, uint8_t bit_count)
 {
+#if CONFIG_SWD_HW_SPI
+    if (bit_count == 8u) {
+        link_board_swd_spi_write_byte((uint8_t)value);
+        return;
+    }
+    if (bit_count == 16u) {
+        uint8_t pair[2];
+        pair[0] = (uint8_t)value;
+        pair[1] = (uint8_t)(value >> 8);
+        link_board_swd_spi_write_bytes(pair, 2u);
+        return;
+    }
+    if (bit_count == 32u) {
+        link_board_swd_spi_write_u32(value);
+        return;
+    }
+#endif
 #if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
     link_board_swd_write_bits_fast(value, bit_count, arm_swd_half_cycle_delay_us);
 #else
@@ -409,6 +426,18 @@ static void arm_swd_idle_cycles(uint8_t cycle_count)
 
 LINK_SWD_RAM_CODE static void arm_swd_idle_low_cycles(uint8_t cycle_count)
 {
+#if CONFIG_SWD_HW_SPI
+    uint8_t full_bytes = (uint8_t)(cycle_count >> 3);
+    uint8_t rem_bits = (uint8_t)(cycle_count & 0x07u);
+
+    if (full_bytes) {
+        link_board_swd_spi_write_zeros(full_bytes);
+    }
+    if (rem_bits) {
+        link_board_swd_idle_low_fast(rem_bits, arm_swd_half_cycle_delay_us);
+    }
+    return;
+#endif
 #if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
     link_board_swd_idle_low_fast(cycle_count, arm_swd_half_cycle_delay_us);
 #else
@@ -518,6 +547,11 @@ static uint8_t arm_swd_use_word_io(void)
 
 LINK_SWD_RAM_CODE static uint32_t arm_swd_read_payload32(void)
 {
+#if CONFIG_SWD_HW_SPI
+    if (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY) {
+        return link_board_swd_spi_read_u32();
+    }
+#endif
     if (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY && arm_swd_use_word_io())
         return link_board_swd_read_word_early(arm_swd_half_cycle_delay_us);
     return arm_swd_read_bits(32);
@@ -526,6 +560,10 @@ LINK_SWD_RAM_CODE static uint32_t arm_swd_read_payload32(void)
 LINK_SWD_RAM_CODE static void arm_swd_write_payload32(uint32_t value, uint8_t ap_drw)
 {
     (void)ap_drw;
+#if CONFIG_SWD_HW_SPI
+    link_board_swd_spi_write_u32(value);
+    return;
+#endif
     if (arm_swd_dap_power_ready) {
         uint8_t owner = link_session_owner();
         if (owner == LINK_OWNER_BLE ||
@@ -1711,6 +1749,9 @@ void target_arm_swd_init(void)
     arm_swd_last_ap_post_data = 0;
     arm_swd_clk_low();
     arm_swd_dio_release();
+#if CONFIG_SWD_HW_SPI
+    link_board_swd_spi_set_clock(250000u);
+#endif
     link_board_target_nrst_set(1);
 }
 
@@ -1765,6 +1806,9 @@ link_target_status_t target_arm_swd_reset(void)
 
 void target_arm_swd_set_clock(uint32_t clock_hz)
 {
+#if CONFIG_SWD_HW_SPI
+    link_board_swd_spi_set_clock(clock_hz);
+#endif
 #if LINK_S9_FAST_CLOCK
     if (clock_hz >= 1000000u) {
         arm_swd_half_cycle_delay_us = clock_hz >= 4000000u ? LINK_SWD_PAD_5MHZ : LINK_SWD_PAD_2MHZ;
@@ -1813,10 +1857,25 @@ void target_arm_swd_swj_sequence(uint16_t bit_count, const uint8_t *data)
     }
 
     arm_swd_dap_invalidate_context();
+#if CONFIG_SWD_HW_SPI
+    {
+        uint16_t full_bytes = (uint16_t)(bit_count >> 3);
+        uint16_t start_bit = (uint16_t)(full_bytes << 3);
+
+        if (full_bytes) {
+            link_board_swd_spi_write_bytes(data, full_bytes);
+        }
+        for (bit_index = start_bit; bit_index < bit_count; bit_index++) {
+            uint8_t bit_val = (uint8_t)((data[bit_index >> 3] >> (bit_index & 0x07u)) & 0x01u);
+            arm_swd_write_bit(bit_val);
+        }
+    }
+#else
     for (bit_index = 0; bit_index < bit_count; bit_index++) {
         uint8_t bit_val = (uint8_t)((data[bit_index >> 3] >> (bit_index & 0x07u)) & 0x01u);
         arm_swd_write_bit(bit_val);
     }
+#endif
     arm_swd_dio_release();
 }
 
@@ -1995,8 +2054,14 @@ link_target_status_t target_arm_swd_dap_write_block(uint8_t request,
             uint32_t i;
             uint32_t rdbuff_val = 0;
 #if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+#if CONFIG_SWD_HW_SPI
+            uint8_t fast_burst = ((arm_swd_half_cycle_delay_us == LINK_SWD_PAD_5MHZ) ||
+                                  (arm_swd_half_cycle_delay_us == LINK_SWD_PAD_2MHZ)) &&
+                                 (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY);
+#else
             uint8_t fast_burst = (arm_swd_half_cycle_delay_us == LINK_SWD_PAD_5MHZ) &&
                                  (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY);
+#endif
 #endif
 
             if (segment_words > remaining) {
@@ -2044,28 +2109,15 @@ link_target_status_t target_arm_swd_dap_write_block(uint8_t request,
                     arm_swd_mem_ap_tar = addr;
                 }
                 link_perf_counters.ap_write_attempts += segment_words;
-                /* Drain posted write via RDBUFF; catches FAULT immediately and clocks idle. */
-                {
-                    uint32_t retry;
-                    uint8_t ack = 0;
-                    for (retry = 0; retry <= wait_retry; retry++) {
-                        ack = link_board_swd_fast_ap_read(0xBDu, &rdbuff_val, trn);
-                        if (ack != ARM_SWD_ACK_WAIT) break;
-                        LINK_PERF_INC(ack_wait);
-                    }
-                    arm_swd_idle_low_cycles(8);
-                    arm_swd_dio_release();
-                    if (ack != ARM_SWD_ACK_OK) {
-                        stage = ARM_SWD_MEM_STAGE_RDBUFF;
-                        detail = addr;
-                        status = (ack == 0xFEu) ? LINK_TARGET_PARITY :
-                                 (ack == ARM_SWD_ACK_WAIT) ? LINK_TARGET_WAIT :
-                                 (ack == ARM_SWD_ACK_FAULT) ? LINK_TARGET_FAULT : LINK_TARGET_IO_ERROR;
-                        link_perf_note_swd(0, 1, ack, (status == LINK_TARGET_IO_ERROR) || (status == LINK_TARGET_PARITY));
-                        arm_swd_set_transfer_diag(0, 1, ARM_SWD_DP_RDBUFF, ack, status, 0);
-                        goto failed;
-                    }
-                    link_perf_counters.dp_read_attempts++;
+                /* Clock idle cycles before draining RDBUFF so the final posted AP write
+                 * settles cleanly across the target AHB-AP synchronizer on fast links. */
+                arm_swd_idle_low_cycles(8);
+                arm_swd_dio_release();
+                stage = ARM_SWD_MEM_STAGE_RDBUFF;
+                detail = addr;
+                status = arm_swd_block_read_dp_wait(ARM_SWD_DP_RDBUFF, &rdbuff_val, wait_retry);
+                if (status != LINK_TARGET_OK) {
+                    goto failed;
                 }
             } else
 #endif
@@ -2160,8 +2212,14 @@ link_target_status_t target_arm_swd_dap_read_block(uint8_t request,
         uint32_t i;
         uint32_t value = 0;
 #if LINK_BLE_ENABLE && LINK_BLE_SWD_WORD_IO
+#if CONFIG_SWD_HW_SPI
+        uint8_t fast_burst = ((arm_swd_half_cycle_delay_us == LINK_SWD_PAD_5MHZ) ||
+                              (arm_swd_half_cycle_delay_us == LINK_SWD_PAD_2MHZ)) &&
+                             (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY);
+#else
         uint8_t fast_burst = (arm_swd_half_cycle_delay_us == LINK_SWD_PAD_5MHZ) &&
                              (arm_swd_sample_mode == ARM_SWD_SAMPLE_EARLY);
+#endif
 #endif
 
         if (segment_words > remaining) {

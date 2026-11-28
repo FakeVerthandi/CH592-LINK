@@ -210,7 +210,7 @@
       $('environment').textContent = available === false ? '浏览器未发现可用蓝牙适配器。请检查蓝牙和浏览器权限后再选择设备。' : 'Web Bluetooth 可用。请保持蓝牙开启，选择运行 CH592 LINK 协议固件的设备。';
       $('environment').classList.toggle('error', available === false);
     } catch (error) { $('environment').textContent = '蓝牙能力检查失败：' + error.message; $('environment').classList.add('error'); }
-    log('页面就绪（WEB 0.4.4 / 协议 v2）。默认保守发送；支持时使用目标端 1KiB 块 CRC32；完整读回可手动选择；擦写不自动重试。'); sync();
+    log('页面就绪（WEB 0.5.0 / 协议 v2）。默认保守发送；支持时使用目标端 1KiB 块 CRC32；完整读回可手动选择；擦写不自动重试。'); sync();
   }
   window.addEventListener?.('pagehide', () => controller.dispose());
   sync(); checkEnvironment();

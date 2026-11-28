@@ -193,7 +193,11 @@ static uint8_t dap_info_string(uint8_t id, uint8_t *response, uint16_t response_
 #else
 #if LINK_BLE_ENABLE
 #if LINK_BLE_SRAM_WRITE
-        text = "0.4.4-ble";
+#if CONFIG_SWD_HW_SPI
+        text = "0.5.0-spi";
+#else
+        text = "0.5.0-gpio";
+#endif
 #else
         text = "0.3.10-ble";
 #endif

@@ -399,7 +399,7 @@
     return `${stage}；SWD ${statuses[d.status] || d.status}；ACK=${d.ack}(${acks[d.ack] || '协议错误'})；` +
       `${d.port ? 'AP' : 'DP'} ${d.read ? '读' : '写'}寄存器 ${hex(d.register)}；` +
       `DPID=${hex(d.dpid)} CTRL/STAT=${hex(d.ctrl)} CSW=${hex(d.csw)} DATA=${hex(d.data)}；` +
-      `读 turnaround=${d.turnaround} 写 phase=${d.writePhase}；详情=${hex(d.detail)}`;
+      `读 turnaround=${d.turnaround} 写 phase=${d.writePhase}；访存=${hex(d.memDetail)}；详情=${hex(d.detail)}`;
   }
   function decodeLinkStatus(p) {
     if (p.length !== 32 || p[0] !== 1) throw Error('蓝牙状态格式或版本不匹配');

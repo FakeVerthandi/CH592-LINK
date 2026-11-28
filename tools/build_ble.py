@@ -48,7 +48,7 @@ for source in sources:
     obj=OUT/(source.replace('/','_').replace('.c','.o').replace('.S','.o'))
     run([BIN/'riscv-none-embed-gcc.exe',*flags,'-fstack-usage','-c',ROOT/source,'-o',obj])
     objects.append(obj)
-name='CH592_LINK_V1_0.4.4-ble'
+name='CH592_LINK_V1_0.5.0-ble'
 elf=OUT/(name+'.elf'); hexfile=OUT/(name+'.hex'); mapfile=OUT/(name+'.map')
 (OUT/'objects.rsp').write_text('\n'.join('"'+p.relative_to(ROOT).as_posix()+'"' for p in objects),encoding='ascii')
 run([BIN/'riscv-none-embed-gcc.exe',*flags,'-T',ROOT/'Ld/Link.ld','-nostartfiles',
